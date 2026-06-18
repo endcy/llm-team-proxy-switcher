@@ -1,0 +1,17 @@
+{
+  "name": "llm-team-proxy-switcher",
+  "version": "1.0.0",
+  "description": "Team-shared LLM API proxy with automatic provider/model switching on rate limiting (429)",
+  "main": "proxy.js",
+  "bin": {
+    "llm-team-proxy-switcher": "./proxy.js"
+  },
+  "scripts": {
+    "start": "node proxy.js"
+  },
+  "keywords": ["proxy", "rate-limit", "model-rotation", "429", "llm"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

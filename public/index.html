@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>llm-team-proxy-switcher</title>
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0b1120;--surface:#151d30;--card:#1a2340;
+  --border:#2a3555;--primary:#3b82f6;--primary-dim:#2563eb;
+  --green:#10b981;--red:#ef4444;--yellow:#f59e0b;
+  --text:#e2e8f0;--dim:#94a3b8;--muted:#64748b;
+  --radius:10px;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh}
+a{color:var(--primary);text-decoration:none;transition:color .2s}
+a:hover{color:#60a5fa}
+
+/* ── Header ────────────────────────── */
+.header{background:linear-gradient(135deg,#0f172a 0%,#1e293b 50%,#0f172a 100%);border-bottom:1px solid var(--border);padding:2rem 0}
+.header-inner{max-width:960px;margin:0 auto;padding:0 1.5rem;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:.75rem}
+.logo-icon{width:40px;height:40px;background:linear-gradient(135deg,var(--primary),#8b5cf6);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.3rem;font-weight:700;color:#fff}
+.logo h1{font-size:1.3rem;font-weight:700;letter-spacing:-.02em}
+.logo span{color:var(--dim);font-size:.8rem;font-weight:400}
+.nav{display:flex;gap:1rem;align-items:center}
+.nav a{padding:.5rem 1rem;border-radius:var(--radius);font-size:.9rem;color:var(--dim);transition:all .2s}
+.nav a:hover,.nav a.active{color:var(--text);background:var(--card)}
+.nav .btn-config{background:var(--primary);color:#fff;font-weight:600}
+.nav .btn-config:hover{background:var(--primary-dim)}
+
+/* ── Container ─────────────────────── */
+.container{max-width:960px;margin:0 auto;padding:2rem 1.5rem}
+
+/* ── Hero ───────────────────────────── */
+.hero{text-align:center;padding:3rem 0 2rem}
+.hero h2{font-size:2rem;font-weight:800;margin-bottom:.75rem;background:linear-gradient(135deg,#e2e8f0,#3b82f6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.hero p{color:var(--dim);font-size:1.1rem;max-width:600px;margin:0 auto}
+
+/* ── Status bar ────────────────────── */
+.status-bar{display:flex;gap:1rem;justify-content:center;flex-wrap:wrap;margin:2rem 0}
+.status-chip{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:.4rem 1rem;font-size:.85rem;display:flex;align-items:center;gap:.5rem}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+.status-dot.off{background:var(--muted);animation:none}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* ── Cards ─────────────────────────── */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin:2rem 0}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.5rem;transition:border-color .2s,transform .2s}
+.card:hover{border-color:var(--primary);transform:translateY(-2px)}
+.card-icon{font-size:1.5rem;margin-bottom:.75rem}
+.card h3{font-size:1rem;font-weight:700;margin-bottom:.5rem}
+.card p{color:var(--dim);font-size:.9rem;line-height:1.5}
+
+/* ── Flow diagram ──────────────────── */
+.flow{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:2rem;margin:2rem 0;overflow-x:auto}
+.flow h3{font-size:1rem;font-weight:700;margin-bottom:1.25rem;text-align:center;color:var(--dim)}
+.flow-diagram{display:flex;align-items:center;justify-content:center;gap:.5rem;flex-wrap:wrap;font-family:'SF Mono',Monaco,'Cascadia Code',monospace;font-size:.82rem}
+.flow-node{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:.6rem 1rem;white-space:nowrap}
+.flow-node.highlight{border-color:var(--primary);background:rgba(59,130,246,.1)}
+.flow-node.success{border-color:var(--green);background:rgba(16,185,129,.1)}
+.flow-node.error{border-color:var(--red);background:rgba(239,68,68,.1)}
+.flow-arrow{color:var(--muted);font-size:1.2rem}
+
+/* ── Code block ────────────────────── */
+.code-section{margin:2rem 0}
+.code-section h3{font-size:1rem;font-weight:700;margin-bottom:1rem}
+.code-block{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;font-family:'SF Mono',Monaco,'Cascadia Code',monospace;font-size:.85rem;line-height:1.7;overflow-x:auto;white-space:pre;color:var(--dim)}
+.code-block .kw{color:var(--primary)}
+.code-block .str{color:var(--green)}
+.code-block .cmt{color:var(--muted)}
+
+/* ── Providers table ───────────────── */
+.providers-section{margin:2rem 0}
+.providers-section h3{font-size:1rem;font-weight:700;margin-bottom:1rem}
+.provider-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;margin-bottom:1rem}
+.provider-header{display:flex;align-items:center;gap:.75rem;margin-bottom:.75rem}
+.provider-badge{background:var(--primary);color:#fff;border-radius:6px;padding:.15rem .5rem;font-size:.75rem;font-weight:700}
+.provider-key{font-family:monospace;color:var(--dim);font-size:.85rem}
+.provider-url{color:var(--muted);font-size:.8rem;margin-bottom:.5rem}
+.provider-models{display:flex;gap:.5rem;flex-wrap:wrap}
+.model-tag{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.2rem .6rem;font-size:.8rem;font-family:monospace}
+
+/* ── CLI Setup ─────────────────────── */
+.cli-section{margin:2rem 0}
+.cli-section h3{font-size:1rem;font-weight:700;margin-bottom:1rem}
+.cli-grid{display:grid;grid-template-columns:1fr;gap:1rem}
+.cli-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;transition:border-color .2s}
+.cli-card:hover{border-color:var(--primary)}
+.cli-card-header{display:flex;align-items:center;gap:.5rem;margin-bottom:.75rem}
+.cli-card-name{font-weight:700;font-size:.95rem}
+.cli-badge{font-size:.7rem;padding:.15rem .5rem;border-radius:10px;font-weight:600}
+.cli-badge.supported{background:rgba(16,185,129,.15);color:var(--green);border:1px solid rgba(16,185,129,.3)}
+.cli-badge.planned{background:rgba(245,158,11,.1);color:var(--yellow);border:1px solid rgba(245,158,11,.3)}
+.cli-env{background:var(--surface);border-radius:6px;padding:.75rem;margin:.5rem 0;font-family:'SF Mono',Monaco,monospace;font-size:.8rem;line-height:1.6;overflow-x:auto;white-space:pre}
+.cli-env .k{color:var(--primary)}
+.cli-env .v{color:var(--green)}
+.cli-file{color:var(--muted);font-size:.8rem;margin-bottom:.4rem}
+.cli-notes{color:var(--dim);font-size:.82rem;line-height:1.5}
+
+/* ── Footer ────────────────────────── */
+.footer{text-align:center;padding:2rem 0;color:var(--muted);font-size:.8rem;border-top:1px solid var(--border);margin-top:2rem}
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="header-inner">
+    <div class="logo">
+      <div class="logo-icon">L</div>
+      <div>
+        <h1>llm-team-proxy-switcher</h1>
+        <span>Team LLM Proxy — Auto Provider/Model Switching</span>
+      </div>
+    </div>
+    <nav class="nav">
+      <a href="/" class="active">Home</a>
+      <a href="/config.html" class="btn-config">Config</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container">
+
+  <section class="hero">
+    <h2>LLM 团队共享智能代理</h2>
+    <p>当模型或 API Key 触发限流时，自动切换到备用 Provider / Model，冷却后自动恢复。团队配额叠加，零依赖开箱即用。</p>
+  </section>
+
+  <div class="status-bar" id="statusBar">
+    <div class="status-chip"><span class="status-dot" id="statusDot"></span> <span id="statusText">Loading...</span></div>
+    <div class="status-chip" id="chipProviders">Providers: —</div>
+    <div class="status-chip" id="chipTargets">Targets: —</div>
+    <div class="status-chip" id="chipCooling">Cooling: —</div>
+  </div>
+
+  <section class="grid">
+    <div class="card">
+      <div class="card-icon">&#x1F504;</div>
+      <h3>二维轮询</h3>
+      <p>同时轮询 Provider 和 Model。一个 Key 限流了换下一个 Key，一个 Model 限流了换下一个 Model，直到找到可用组合。</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">&#x1F511;</div>
+      <h3>团队 Key 共享</h3>
+      <p>多个成员各自购买套餐的 API Key 配置为不同 Provider，自动在所有 Key 之间轮询，叠加团队总配额。</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">&#x23F1;</div>
+      <h3>自动恢复</h3>
+      <p>被限流的 Provider / Model 进入冷却期，冷却结束后自动恢复为默认主配置（最强模型 + 主 Key）。</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">&#x1F310;</div>
+      <h3>独立 Base URL</h3>
+      <p>每个 Provider 可以配置不同的 API 地址，支持跨平台混合（阿里云、Anthropic、自建服务等）。</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">&#x26A1;</div>
+      <h3>零依赖</h3>
+      <p>纯 Node.js 内置模块实现，无需 npm install。一个 config.json + 一个 proxy.js 即可运行。</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">&#x1F527;</div>
+      <h3>热更新</h3>
+      <p>修改 config.json 后无需重启代理，自动检测配置文件变化并重新加载。也可通过 Web 界面编辑。</p>
+    </div>
+  </section>
+
+  <section class="flow">
+    <h3>Request Flow</h3>
+    <div class="flow-diagram">
+      <div class="flow-node highlight">Claude Code</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-node highlight">Proxy :9982</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-node">P0 / model0</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-node error">429 !</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-node">P0 / model1</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-node error">429 !</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-node success">P1 / model0 &#10003;</div>
+    </div>
+  </section>
+
+  <section class="code-section">
+    <h3>Quick Start</h3>
+    <div class="code-block"><span class="cmt"># 1. 编辑配置</span>
+<span class="kw">Edit</span> config.json <span class="cmt">← 或通过上方 [Config] 按钮在 Web 界面编辑</span>
+
+<span class="cmt"># 2. 设置 Claude Code 走代理</span>
+<span class="kw">export</span> ANTHROPIC_BASE_URL=http://127.0.0.1:9982
+
+<span class="cmt"># 3. 启动代理</span>
+<span class="kw">node</span> proxy.js</div>
+  </section>
+
+  <section class="providers-section" id="providersSection">
+    <h3>Current Providers</h3>
+    <div id="providersList">Loading...</div>
+  </section>
+
+  <section class="cli-section" id="cliSection">
+    <h3>CLI Setup Guide</h3>
+    <div class="cli-grid" id="cliList">Loading...</div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  llm-team-proxy-switcher v1.0.0 &mdash; Zero-dependency LLM team proxy with auto provider/model switching
+</footer>
+
+<script>
+async function loadStatus() {
+  try {
+    const res = await fetch('/api/status');
+    const data = await res.json();
+
+    document.getElementById('statusText').textContent = data.providers.length > 0 ? 'Running' : 'No providers';
+    document.getElementById('statusDot').className = data.providers.length > 0 ? 'status-dot' : 'status-dot off';
+    document.getElementById('chipProviders').textContent = `Providers: ${data.providers.length}`;
+    document.getElementById('chipTargets').textContent = `Targets: ${data.totalTargets}`;
+    document.getElementById('chipCooling').textContent = `Cooling: ${data.coolingTargets.length}`;
+
+    const list = document.getElementById('providersList');
+    if (data.providers.length === 0) {
+      list.innerHTML = '<p style="color:var(--muted)">No providers configured. <a href="/config.html">Go to Config</a></p>';
+      return;
+    }
+    list.innerHTML = data.providers.map((p, i) => `
+      <div class="provider-card">
+        <div class="provider-header">
+          <span class="provider-badge">P${i}</span>
+          <span class="provider-key">${esc(p.apiKeyPreview)}</span>
+        </div>
+        <div class="provider-url">${esc(p.baseUrl)}</div>
+        <div class="provider-models">
+          ${p.models.map(m => `<span class="model-tag">${esc(m)}</span>`).join('')}
+        </div>
+      </div>
+    `).join('');
+  } catch (err) {
+    document.getElementById('statusText').textContent = 'Proxy offline';
+    document.getElementById('statusDot').className = 'status-dot off';
+    document.getElementById('providersList').innerHTML =
+      '<p style="color:var(--red)">Cannot connect to proxy. Is it running?</p>';
+  }
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+async function loadCliSetup() {
+  try {
+    const res = await fetch('/api/cli-setup');
+    const data = await res.json();
+    const list = document.getElementById('cliList');
+    list.innerHTML = Object.entries(data).map(([key, cli]) => {
+      const badge = cli.status === 'supported'
+        ? '<span class="cli-badge supported">Supported</span>'
+        : '<span class="cli-badge planned">Planned</span>';
+      const envLines = Object.entries(cli.env).map(([k, v]) =>
+        `<span class="k">${esc(k)}</span>: <span class="v">${esc(v)}</span>`
+      ).join('\n');
+      return `
+        <div class="cli-card">
+          <div class="cli-card-header">
+            <span class="cli-card-name">${esc(cli.name)}</span>
+            ${badge}
+          </div>
+          <div class="cli-env">${envLines}</div>
+          <div class="cli-file">Config: ${esc(cli.configFile)}</div>
+          <div class="cli-notes">${esc(cli.notes)}</div>
+        </div>
+      `;
+    }).join('');
+  } catch (err) {
+    document.getElementById('cliList').innerHTML =
+      '<p style="color:var(--muted)">Cannot load CLI setup data.</p>';
+  }
+}
+
+loadStatus();
+loadCliSetup();
+setInterval(loadStatus, 5000);
+</script>
+</body>
+</html>

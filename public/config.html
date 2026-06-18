@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Config — llm-team-proxy-switcher</title>
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0b1120;--surface:#151d30;--card:#1a2340;
+  --border:#2a3555;--primary:#3b82f6;--primary-dim:#2563eb;
+  --green:#10b981;--red:#ef4444;--yellow:#f59e0b;
+  --text:#e2e8f0;--dim:#94a3b8;--muted:#64748b;
+  --radius:10px;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh}
+a{color:var(--primary);text-decoration:none;transition:color .2s}
+a:hover{color:#60a5fa}
+
+/* ── Header ────────────────────────── */
+.header{background:linear-gradient(135deg,#0f172a 0%,#1e293b 50%,#0f172a 100%);border-bottom:1px solid var(--border);padding:2rem 0}
+.header-inner{max-width:960px;margin:0 auto;padding:0 1.5rem;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:.75rem}
+.logo-icon{width:40px;height:40px;background:linear-gradient(135deg,var(--primary),#8b5cf6);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.3rem;font-weight:700;color:#fff}
+.logo h1{font-size:1.3rem;font-weight:700;letter-spacing:-.02em}
+.logo span{color:var(--dim);font-size:.8rem;font-weight:400}
+.nav{display:flex;gap:1rem;align-items:center}
+.nav a{padding:.5rem 1rem;border-radius:var(--radius);font-size:.9rem;color:var(--dim);transition:all .2s}
+.nav a:hover,.nav a.active{color:var(--text);background:var(--card)}
+.nav .btn-home{background:var(--card);border:1px solid var(--border)}
+
+/* ── Container ─────────────────────── */
+.container{max-width:960px;margin:0 auto;padding:2rem 1.5rem}
+.page-title{font-size:1.5rem;font-weight:800;margin-bottom:.5rem}
+.page-desc{color:var(--dim);margin-bottom:2rem}
+
+/* ── Editor layout ─────────────────── */
+.editor-wrap{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.editor-toolbar{display:flex;align-items:center;justify-content:space-between;padding:.75rem 1.25rem;background:var(--surface);border-bottom:1px solid var(--border)}
+.editor-toolbar .filename{font-family:monospace;font-size:.85rem;color:var(--dim);display:flex;align-items:center;gap:.5rem}
+.editor-toolbar .filename::before{content:'';display:inline-block;width:8px;height:8px;background:var(--yellow);border-radius:50%}
+.editor-actions{display:flex;gap:.75rem}
+textarea#editor{width:100%;min-height:500px;background:var(--card);color:var(--text);border:none;padding:1.25rem;font-family:'SF Mono',Monaco,'Cascadia Code','Consolas',monospace;font-size:.88rem;line-height:1.7;resize:vertical;outline:none;tab-size:2}
+textarea#editor::selection{background:rgba(59,130,246,.3)}
+
+/* ── Buttons ───────────────────────── */
+.btn{padding:.5rem 1.25rem;border-radius:8px;font-size:.88rem;font-weight:600;border:none;cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:.4rem}
+.btn-primary{background:var(--primary);color:#fff}
+.btn-primary:hover{background:var(--primary-dim)}
+.btn-secondary{background:var(--surface);color:var(--dim);border:1px solid var(--border)}
+.btn-secondary:hover{color:var(--text);border-color:var(--dim)}
+.btn-danger{background:transparent;color:var(--red);border:1px solid var(--red)}
+.btn-danger:hover{background:rgba(239,68,68,.1)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* ── Toast ─────────────────────────── */
+.toast{position:fixed;bottom:2rem;right:2rem;padding:.75rem 1.5rem;border-radius:var(--radius);font-size:.9rem;font-weight:600;transform:translateY(100px);opacity:0;transition:all .3s ease;z-index:999;display:flex;align-items:center;gap:.5rem}
+.toast.show{transform:translateY(0);opacity:1}
+.toast.success{background:var(--green);color:#fff}
+.toast.error{background:var(--red);color:#fff}
+.toast.info{background:var(--primary);color:#fff}
+
+/* ── Help section ──────────────────── */
+.help{margin-top:2rem;display:grid;grid-template-columns:repeat(2,1fr);gap:1.25rem}
+.help-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem}
+.help-card h4{font-size:.9rem;font-weight:700;margin-bottom:.5rem;color:var(--primary)}
+.help-card p{font-size:.85rem;color:var(--dim);line-height:1.5}
+.help-card code{background:var(--surface);padding:.1rem .4rem;border-radius:4px;font-size:.82rem;color:var(--green)}
+
+/* ── Validation ────────────────────── */
+.validation{padding:.75rem 1.25rem;font-size:.85rem;display:none;border-top:1px solid var(--border)}
+.validation.show{display:block}
+.validation.ok{color:var(--green);background:rgba(16,185,129,.05)}
+.validation.err{color:var(--red);background:rgba(239,68,68,.05)}
+
+/* ── Tabs ──────────────────────────── */
+.tabs{display:flex;gap:.5rem;margin-bottom:1.5rem}
+.tab{padding:.5rem 1.25rem;border-radius:8px;font-size:.9rem;font-weight:600;border:1px solid var(--border);background:var(--surface);color:var(--dim);cursor:pointer;transition:all .2s}
+.tab:hover{color:var(--text);border-color:var(--dim)}
+.tab.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+
+/* ── CLI Setup Cards ───────────────── */
+.cli-grid{display:grid;grid-template-columns:1fr;gap:1rem}
+.cli-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:1.25rem;transition:border-color .2s}
+.cli-card:hover{border-color:var(--primary)}
+.cli-card-header{display:flex;align-items:center;gap:.5rem;margin-bottom:.75rem}
+.cli-card-name{font-weight:700;font-size:.95rem}
+.cli-badge{font-size:.7rem;padding:.15rem .5rem;border-radius:10px;font-weight:600}
+.cli-badge.supported{background:rgba(16,185,129,.15);color:var(--green);border:1px solid rgba(16,185,129,.3)}
+.cli-badge.planned{background:rgba(245,158,11,.1);color:var(--yellow);border:1px solid rgba(245,158,11,.3)}
+.cli-env{background:var(--surface);border-radius:6px;padding:.75rem;margin:.5rem 0;font-family:'SF Mono',Monaco,monospace;font-size:.8rem;line-height:1.6;overflow-x:auto;white-space:pre}
+.cli-env .k{color:var(--primary)}
+.cli-env .v{color:var(--green)}
+.cli-file{color:var(--muted);font-size:.8rem;margin-bottom:.4rem}
+.cli-notes{color:var(--dim);font-size:.82rem;line-height:1.5}
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="header-inner">
+    <div class="logo">
+      <div class="logo-icon">L</div>
+      <div>
+        <h1>llm-team-proxy-switcher</h1>
+        <span>Configuration Editor</span>
+      </div>
+    </div>
+    <nav class="nav">
+      <a href="/" class="btn-home">Home</a>
+      <a href="/config.html" class="active">Config</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container">
+  <h2 class="page-title">Configuration</h2>
+  <p class="page-desc">编辑 <code>config.json</code> 或查看各 CLI 工具的配置指南。</p>
+
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('editor')" id="tabEditor">Config Editor</button>
+    <button class="tab" onclick="switchTab('cli')" id="tabCli">CLI Setup Guide</button>
+  </div>
+
+  <div id="panelEditor">
+  <div class="editor-wrap">
+    <div class="editor-toolbar">
+      <div class="filename">config.json</div>
+      <div class="editor-actions">
+        <button class="btn btn-secondary" onclick="formatJSON()" title="Format JSON">Format</button>
+        <button class="btn btn-secondary" onclick="resetConfig()" title="Reload from disk">Reset</button>
+        <button class="btn btn-primary" onclick="saveConfig()" id="saveBtn">Save</button>
+      </div>
+    </div>
+    <textarea id="editor" spellcheck="false" placeholder="Loading config.json..."></textarea>
+    <div class="validation" id="validation"></div>
+  </div>
+
+  <section class="help">
+    <div class="help-card">
+      <h4>providers</h4>
+      <p>Provider 配置数组。每个 Provider 包含 <code>base-url</code>（API 地址）、<code>api-key</code>（密钥）、<code>models</code>（可用模型列表）。按数组顺序轮询。</p>
+    </div>
+    <div class="help-card">
+      <h4>limiter-recovery-seconds</h4>
+      <p>被限流的 Provider / Model 冷却恢复时间（秒）。默认 <code>300</code>（5 分钟）。到期后自动恢复为第一个 Provider 的第一个 Model。</p>
+    </div>
+    <div class="help-card">
+      <h4>port / bind</h4>
+      <p>代理监听端口和地址。默认 <code>9982</code> / <code>0.0.0.0</code>（内网所有成员可访问）。如需限制本机使用改为 <code>127.0.0.1</code>。</p>
+    </div>
+    <div class="help-card">
+      <h4>maxRetries</h4>
+      <p>每次请求最大轮询次数（跨 Provider + Model 组合）。默认 <code>20</code>。</p>
+    </div>
+    <div class="help-card">
+      <h4>requestTimeoutMs</h4>
+      <p>上游 API 请求超时时间（毫秒）。默认 <code>300000</code>（5 分钟）。</p>
+    </div>
+    <div class="help-card">
+      <h4>Rotation Order</h4>
+      <p><code>P0/m0 &rarr; P0/m1 &rarr; P1/m0 &rarr; P1/m1 &rarr; ...</code><br>依次尝试所有组合，429 时自动切换下一个。</p>
+    </div>
+  </section>
+  </div>
+
+  <div id="panelCli" style="display:none">
+    <div class="cli-grid" id="cliSetupList">Loading...</div>
+  </div>
+
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const editor = document.getElementById('editor');
+const validation = document.getElementById('validation');
+
+async function loadConfig() {
+  try {
+    const res = await fetch('/api/config');
+    const data = await res.json();
+    editor.value = JSON.stringify(data, null, 2);
+    validate();
+  } catch (err) {
+    showToast('Failed to load config: ' + err.message, 'error');
+  }
+}
+
+async function saveConfig() {
+  const btn = document.getElementById('saveBtn');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+
+  try {
+    const parsed = JSON.parse(editor.value);
+    const res = await fetch('/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(parsed, null, 2),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Save failed');
+    }
+
+    showToast('Config saved successfully', 'success');
+    validate();
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      showToast('Invalid JSON: ' + err.message, 'error');
+      showValidation('JSON parse error: ' + err.message, false);
+    } else {
+      showToast('Save failed: ' + err.message, 'error');
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save';
+  }
+}
+
+async function resetConfig() {
+  await loadConfig();
+  showToast('Config reloaded from disk', 'info');
+}
+
+function formatJSON() {
+  try {
+    const parsed = JSON.parse(editor.value);
+    editor.value = JSON.stringify(parsed, null, 2);
+    showValidation('JSON formatted', true);
+  } catch (err) {
+    showValidation('Cannot format: invalid JSON — ' + err.message, false);
+  }
+}
+
+function validate() {
+  try {
+    const parsed = JSON.parse(editor.value);
+    const issues = [];
+
+    if (!parsed.providers || !Array.isArray(parsed.providers)) {
+      issues.push('Missing "providers" array');
+    } else {
+      parsed.providers.forEach((p, i) => {
+        if (!p['base-url']) issues.push(`Provider P${i}: missing "base-url"`);
+        if (!p['api-key']) issues.push(`Provider P${i}: missing "api-key"`);
+        if (!p.models || !p.models.length) issues.push(`Provider P${i}: "models" is empty`);
+      });
+    }
+
+    if (issues.length > 0) {
+      showValidation('Warnings: ' + issues.join('; '), false);
+    } else {
+      const totalModels = parsed.providers.reduce((s, p) => s + (p.models || []).length, 0);
+      showValidation(`Valid — ${parsed.providers.length} provider(s), ${totalModels} target(s)`, true);
+    }
+  } catch (err) {
+    showValidation('Invalid JSON: ' + err.message, false);
+  }
+}
+
+function showValidation(msg, ok) {
+  validation.textContent = msg;
+  validation.className = 'validation show ' + (ok ? 'ok' : 'err');
+}
+
+function showToast(msg, type) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + type + ' show';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.className = 'toast', 3000);
+}
+
+// Live validation on input
+let debounceTimer;
+editor.addEventListener('input', () => {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(validate, 500);
+});
+
+// Ctrl+S to save
+editor.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+    e.preventDefault();
+    saveConfig();
+  }
+  // Tab support
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    editor.value = editor.value.substring(0, start) + '  ' + editor.value.substring(end);
+    editor.selectionStart = editor.selectionEnd = start + 2;
+  }
+});
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+// Tab switching
+function switchTab(tab) {
+  document.getElementById('panelEditor').style.display = tab === 'editor' ? '' : 'none';
+  document.getElementById('panelCli').style.display = tab === 'cli' ? '' : 'none';
+  document.getElementById('tabEditor').className = 'tab' + (tab === 'editor' ? ' active' : '');
+  document.getElementById('tabCli').className = 'tab' + (tab === 'cli' ? ' active' : '');
+  if (tab === 'cli') loadCliSetup();
+}
+
+// CLI Setup loader
+let cliLoaded = false;
+async function loadCliSetup() {
+  if (cliLoaded) return;
+  try {
+    const res = await fetch('/api/cli-setup');
+    const data = await res.json();
+    const list = document.getElementById('cliSetupList');
+    list.innerHTML = Object.entries(data).map(([key, cli]) => {
+      const badge = cli.status === 'supported'
+        ? '<span class="cli-badge supported">Supported</span>'
+        : '<span class="cli-badge planned">Planned</span>';
+      const envLines = Object.entries(cli.env).map(([k, v]) =>
+        `<span class="k">${esc(k)}</span>: <span class="v">${esc(v)}</span>`
+      ).join('\n');
+      return `
+        <div class="cli-card">
+          <div class="cli-card-header">
+            <span class="cli-card-name">${esc(cli.name)}</span>
+            ${badge}
+          </div>
+          <div class="cli-env">${envLines}</div>
+          <div class="cli-file">Config: ${esc(cli.configFile)}</div>
+          <div class="cli-notes">${esc(cli.notes)}</div>
+        </div>
+      `;
+    }).join('');
+    cliLoaded = true;
+  } catch (err) {
+    document.getElementById('cliSetupList').innerHTML =
+      '<p style="color:var(--red)">Cannot load CLI setup data.</p>';
+  }
+}
+
+loadConfig();
+</script>
+</body>
+</html>

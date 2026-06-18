@@ -1,0 +1,33 @@
+{
+  "port": 9982,
+  "bind": "0.0.0.0",
+  "maxRetries": 20,
+  "requestTimeoutMs": 300000,
+  "limiter-recovery-seconds": 300,
+  "providers": [
+    {
+      "base-url": "https://coding.dashscope.aliyuncs.com/apps/anthropic",
+      "api-key": "sk-sp-one-key",
+      "models": [
+        "qwen3.7-plus",
+        "qwen3.6-plus"
+      ]
+    },
+    {
+      "base-url": "https://opencode.ai/zen/go",
+      "api-key": "sk-two-key",
+      "models": [
+        "qwen3.7-plus",
+        "deepseek-v4-pro"
+      ]
+    },
+    {
+      "base-url": "https://ark.cn-beijing.volces.com/api/coding",
+      "api-key": "sk-three-key",
+      "models": [
+        "qwen3.6-plus",
+        "deepseek-v4-pro"
+      ]
+    }
+  ]
+}
