@@ -12,6 +12,8 @@ config.local.json
 ### Logs ###
 *.log
 logs/
+log/
+llm-proxy.pid
 
 ### OS ###
 .DS_Store

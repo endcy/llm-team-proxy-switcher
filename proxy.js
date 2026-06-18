@@ -36,6 +36,9 @@ const C = {
 const PROXY_DIR = __dirname;
 const CONFIG_PATH = path.join(PROXY_DIR, 'config.json');
 const PUBLIC_DIR = path.join(PROXY_DIR, 'public');
+const LOG_DIR = path.join(PROXY_DIR, 'log');
+const LOG_FILE = path.join(LOG_DIR, 'llm-proxy.log');
+const LOG_MAX_SIZE = 200 * 1024 * 1024; // 200MB
 
 // ─── Display URL helper ──────────────────────────────────────────
 function getLocalIP() {
@@ -235,6 +238,46 @@ function log(type, msg) {
     'response':     `${C.gray}←${C.reset}`,
   }[type] || '?';
   console.log(`  ${C.gray}${ts}${C.reset} ${prefix} ${msg}`);
+  logToFile(type, msg);
+}
+
+/** Strip ANSI color codes for plain text log */
+function stripAnsi(text) {
+  return text.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+/** Write log to file with rotation (max 200MB, archive with timestamp) */
+function logToFile(type, msg) {
+  try {
+    if (!fs.existsSync(LOG_DIR)) {
+      fs.mkdirSync(LOG_DIR, { recursive: true });
+    }
+
+    // Check if current log exceeds max size
+    if (fs.existsSync(LOG_FILE)) {
+      const stat = fs.statSync(LOG_FILE);
+      if (stat.size >= LOG_MAX_SIZE) {
+        const now = new Date();
+        const ts = now.getFullYear()
+          + String(now.getMonth() + 1).padStart(2, '0')
+          + String(now.getDate()).padStart(2, '0') + '-'
+          + String(now.getHours()).padStart(2, '0')
+          + String(now.getMinutes()).padStart(2, '0')
+          + String(now.getSeconds()).padStart(2, '0');
+        const archiveName = `llm-proxy-${ts}.log`;
+        const archivePath = path.join(LOG_DIR, archiveName);
+        fs.renameSync(LOG_FILE, archivePath);
+      }
+    }
+
+    const now = new Date();
+    const ts = now.toISOString().replace('T', ' ').substring(0, 19);
+    const plain = stripAnsi(msg);
+    const line = `[${ts}] [${type}] ${plain}\n`;
+    fs.appendFileSync(LOG_FILE, line, 'utf-8');
+  } catch {
+    // Never let logging errors crash the proxy
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════

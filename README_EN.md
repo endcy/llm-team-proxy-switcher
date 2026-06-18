@@ -182,13 +182,19 @@ Forward to upstream API
 ```bash
 cd llm-team-proxy-switcher
 
-# One-click start (recommended)
-start.bat        # Windows
-./start.sh       # Linux / macOS
+# Foreground (recommended for debugging)
+start.bat                    # Windows
+./start.sh                   # Linux / macOS
+
+# Background (Linux / macOS)
+./start.sh -d                # Start in background, log to ./log/llm-proxy.log
+./start.sh --stop            # Stop background proxy
 
 # Or run directly
 node proxy.js
 ```
+
+> **Auto log rotation:** Log files are automatically archived with a timestamp when exceeding 200MB (e.g. `llm-proxy-20260618-193000.log`), and a fresh log file is started.
 
 The proxy loads all Provider configs, builds the rotation matrix, and starts the Web UI.
 

@@ -268,13 +268,19 @@ Claude Code 的 hooks 只能拦截工具调用（PreToolUse/PostToolUse）和注
 ```bash
 cd llm-team-proxy-switcher
 
-# 一键启动（推荐）
-start.bat        # Windows
-./start.sh       # Linux / macOS
+# 前台运行（推荐调试用）
+start.bat                    # Windows
+./start.sh                   # Linux / macOS
+
+# 后台运行（Linux / macOS）
+./start.sh -d                # 后台启动，日志输出到 ./log/llm-proxy.log
+./start.sh --stop            # 停止后台运行的代理
 
 # 或直接运行
 node proxy.js
 ```
+
+> **日志自动归档：** 日志文件超过 200MB 时自动归档为带时间戳的文件（如 `llm-proxy-20260618-193000.log`），当前日志重新开始写入。
 
 代理启动后：
 - 监听在 `0.0.0.0:9982`（内网所有成员可访问）
