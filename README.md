@@ -79,30 +79,7 @@
 
 ### 架构概览
 
-```
-Claude Code / Cursor / Codex
-       │
-       │  只知道：ANTHROPIC_BASE_URL=http://proxy:9982
-       │  发送：model=任意值, api-key=任意值
-       │
-       ▼
-┌──────────────────────────────────┐
-│  limiter-proxy (:9982)           │
-│                                  │
-│  1. 接收请求（忽略客户端的 model/key）
-│  2. 从 config.json 选择当前目标   │
-│  3. 替换请求体中的 model          │
-│  4. 替换请求头中的 API Key        │
-│  5. 转发到目标 Provider 的 URL    │
-│  6. 收到 429 → 切换下一个目标     │
-│  7. 成功 → 原样返回给客户端       │
-│                                  │
-│  冷却后自动恢复 P0/key0 + model0 │
-└──────────┬───────────────────────┘
-           │
-           ▼
-    各 Provider API（可不同 base-url）
-```
+![架构概览](.assets/workflow.png)
 
 ### Claude Code 需要改哪些配置？
 
@@ -222,32 +199,7 @@ Anthropic 格式:   x-api-key: sk-xxx
 
 ### 请求生命周期
 
-```
-客户端请求到达
-    │
-    ▼
-解析请求体 JSON
-    │
-    ▼
-resolveTarget() ──→ 当前哪个目标可用？
-    │                  ├─ 主目标未冷却 → 使用主目标
-    │                  └─ 主目标已冷却 → 按顺序找下一个
-    ▼
-替换 model + api-key + base-url
-    │
-    ▼
-转发到上游 API
-    │
-    ├─ 200 成功 → 原样返回给客户端 ✓
-    │
-    ├─ 429 限流 → 标记当前目标冷却
-    │              resolveTarget() 找下一个
-    │              递归重试（最多 maxRetries 次）
-    │
-    ├─ 连接失败 → 标记冷却，重试下一个
-    │
-    └─ 超时 → 返回 504 给客户端
-```
+![请求生命周期](.assets/cycle.png)
 
 ### 为什么用代理而不是 Claude Code 插件？
 

@@ -79,32 +79,7 @@ How it compares to similar tools:
 
 ### Architecture
 
-```
-Claude Code (currently supported)
-       │
-       │  Only knows: ANTHROPIC_BASE_URL=http://proxy:9982
-       │  Sends: model=anything, api-key=anything
-       │
-       ▼
-┌──────────────────────────────────┐
-│  llm-team-proxy-switcher (:9982) │
-│                                  │
-│  1. Receive request (ignore      │
-│     client's model/key)          │
-│  2. Pick current target from     │
-│     config.json                  │
-│  3. Replace model in body        │
-│  4. Replace API key in headers   │
-│  5. Forward to target Provider   │
-│  6. Got 429 → switch to next     │
-│  7. Success → return to client   │
-│                                  │
-│  Auto-recover after cooldown     │
-└──────────┬───────────────────────┘
-           │
-           ▼
-    Real Provider APIs (each can have different base-url)
-```
+![Architecture](.assets/workflow.png)
 
 ### What Does the Proxy Replace?
 
@@ -146,32 +121,7 @@ Flattened target list (tried in order):
 
 ### Request Lifecycle
 
-```
-Client request arrives
-    │
-    ▼
-Parse request body JSON
-    │
-    ▼
-resolveTarget() → which target is available?
-    │   ├─ Primary not cooled → use primary
-    │   └─ Primary cooled → find next in order
-    ▼
-Replace model + api-key + base-url
-    │
-    ▼
-Forward to upstream API
-    │
-    ├─ 200 success → return to client ✓
-    │
-    ├─ 429 rate limit → mark target cooled
-    │                   resolveTarget() for next
-    │                   retry (up to maxRetries)
-    │
-    ├─ Connection error → mark cooled, retry next
-    │
-    └─ Timeout → return 504 to client
-```
+![Request Lifecycle](.assets/cycle.png)
 
 ---
 
