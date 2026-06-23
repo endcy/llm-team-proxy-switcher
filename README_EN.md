@@ -14,7 +14,7 @@ Simply run this proxy on a team server, point all members' CLI tools to it, and 
 
 | Pain Point | Solution |
 |-----------|----------|
-| ❌ Single API Key hits 429 rate limit frequently | ✅ Auto-rotate across multiple Keys, pool team quotas |
+| ❌ Single API Key hits 429 rate limit / 524 timeout / 529 overloaded frequently | ✅ Auto-rotate across multiple Keys, pool team quotas |
 | ❌ Rate limit error interrupts workflow | ✅ Seamlessly switch to backup Key / Model |
 | ❌ Each team member deploys their own proxy | ✅ One server deployment, shared by the whole team |
 | ❌ Different members use different Providers / Models | ✅ Each Provider has independent base-url, key, and model list |
@@ -48,7 +48,7 @@ Most LLM proxy tools on the market are built for **token-based billing** scenari
 
 **This tool is built specifically for Coding Plan subscribers.** If you and your team each have a Claude Code / Codex Coding Plan subscription with independent API keys and quotas, you don't need a bloated LLM gateway. You need a **simple, lightweight, quota-pooling proxy that switches on rate limits**.
 
-That's exactly what this project does: **one JSON config + one JS file + one command** — and your whole team shares all members' Coding Plan quotas, with seamless auto-switching on 429 rate limits.
+That's exactly what this project does: **one JSON config + one JS file + one command** — and your whole team shares all members' Coding Plan quotas, with seamless auto-switching on 429 rate limit / 524 timeout / 529 overloadeds.
 
 > 💡 **One-line advantage:** Zero dependencies, single file, deploy in seconds. No token billing, no user management — just Plan quota pooling and rate-limit switching. Solving the most painful problem with the least code.
 
@@ -70,7 +70,7 @@ How it compares to similar tools:
 | **Claude Code** | ✅ Supported | Fully tested and verified |
 | **Codex (OpenAI)** | ✅ Supported | OpenAI-compatible format |
 | **Cursor** | 🔜 Planned | Same principle, pending verification |
-| **OpenClaw** | 🔜 Planned | Same principle, pending verification |
+| **OpenClaw** | ✅ Supported | Auto-strips provider prefix (e.g. bailian/qwen3.7-plus) |
 | Other OpenAI / Anthropic-compatible CLI | ✅ Supported | Any client with custom API Base URL support |
 
 ---
@@ -114,8 +114,8 @@ Flattened target list (tried in order):
 
 **Rules:**
 1. Requests start with target [0] (P0's first model)
-2. 429 → target [0] enters cooldown, switch to [1]
-3. [1] also 429 → switch to [2] (new Provider + Key)
+2. 429 / 524 / 529 → target [0] enters cooldown, switch to [1]
+3. [1] also returns 429 / 524 / 529 / 524 / 529 → switch to [2] (new Provider + Key)
 4. Continue until a working combination is found
 5. After cooldown → target [0] recovers → auto-switch back
 
@@ -136,9 +136,10 @@ cd llm-team-proxy-switcher
 start.bat                    # Windows
 ./start.sh                   # Linux / macOS
 
-# Background (Linux / macOS)
-./start.sh -d                # Start in background, log to ./log/llm-proxy.log
+# Background (Linux / macOS, recommended for servers)
+nohup ./start.sh -d &        # Start in background, log to ./log/llm-proxy.log
 ./start.sh --stop            # Stop background proxy
+./start.sh --restart         # Restart background proxy
 
 # Or run directly
 node proxy.js
@@ -176,7 +177,7 @@ Claude Code sends `POST /v1/messages` to the proxy. The proxy:
 1. Selects the current target from the rotation matrix
 2. Replaces model, API key, and base-url
 3. Forwards to the real API
-4. Returns the response (or retries on 429)
+4. Returns the response (or retries on 429 / 524 / 529)
 
 ### Step 5: Cooldown Recovery
 
@@ -233,12 +234,38 @@ api_key = "dummy"
 3. Set to: `http://192.168.23.145:9982/v1`
 4. Set OpenAI API Key to any non-empty value
 
-### OpenClaw (🔜 Pending Verification)
+### OpenClaw (✅ Verified)
 
-```bash
-export OPENAI_BASE_URL=http://192.168.23.145:9982/v1
-export OPENAI_API_KEY=dummy
+When using Coding Plan keys with OpenClaw, **Anthropic format is required**:
+
+```json
+{
+  "models": {
+    "providers": {
+      "bailian": {
+        "baseUrl": "http://<proxy-ip>:9982/v1",
+        "apiKey": "dummy",
+        "api": "anthropic-messages",
+        "models": [
+          { "id": "qwen3.7-plus", "name": "qwen3.7-plus" },
+          { "id": "qwen3.6-plus", "name": "qwen3.6-plus" }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "qwen3.7-plus" },
+      "models": {
+        "qwen3.7-plus": {},
+        "qwen3.6-plus": {}
+      }
+    }
+  }
+}
 ```
+
+> **Note:** Coding Plan keys (`sk-sp-` prefix) only work with Anthropic format (`api: "anthropic-messages"`), not OpenAI format. The proxy automatically strips provider prefixes (e.g. `bailian/qwen3.7-plus` → `qwen3.7-plus`) and replaces the API key.
 
 ### Generic (Any OpenAI / Anthropic-Compatible Client)
 
@@ -258,7 +285,7 @@ API Key:   dummy (any non-empty value)
 - All clients share one proxy deployment — no need to install anywhere else
 - Proxy auto-handles auth header format (`Authorization: Bearer` and `x-api-key` both supported)
 - Proxy auto-handles model validation (`GET /v1/models` returns configured model list)
-- Proxy auto-handles 429 rate limit switching — fully transparent to clients
+- Proxy auto-handles 429 rate limit / 524 timeout / 529 overloaded switching — fully transparent to clients
 
 ---
 
@@ -463,6 +490,17 @@ The proxy handles `GET /v1/models` to pass model validation. Make sure the proxy
 Changes to `config.json` take effect immediately — no restart needed.
 
 ---
+
+
+## Changelog
+
+### 2026-06-23
+
+- Added automatic switching for HTTP 524 and 529:
+  - `429`: quota / request rate exceeded
+  - `524`: upstream response timeout
+  - `529`: upstream overloaded or busy
+- These status codes put the current target into cooldown and automatically switch to the next Provider / Model.
 
 ## License
 

@@ -39,6 +39,7 @@ const PUBLIC_DIR = path.join(PROXY_DIR, 'public');
 const LOG_DIR = path.join(PROXY_DIR, 'log');
 const LOG_FILE = path.join(LOG_DIR, 'llm-proxy.log');
 const LOG_MAX_SIZE = 200 * 1024 * 1024; // 200MB
+const SWITCH_STATUS_CODES = new Set([429, 524, 529]);
 
 // ─── Display URL helper ──────────────────────────────────────────
 function getLocalIP() {
@@ -399,14 +400,15 @@ function getCliSetupData(proxyUrl, defaultModel) {
     },
     'openclaw': {
       name: 'OpenClaw',
-      status: 'planned',
-      icon: '🔜',
+      status: 'supported',
+      icon: '',
       env: {
-        OPENAI_BASE_URL: proxyUrl + '/v1',
-        OPENAI_API_KEY: 'dummy',
+        'models.providers.<name>.baseUrl': proxyUrl + '/v1',
+        'models.providers.<name>.api': 'anthropic-messages',
+        'models.providers.<name>.apiKey': 'dummy',
       },
-      configFile: 'OpenClaw config',
-      notes: 'OpenAI-compatible. Uses same proxy endpoint.',
+      configFile: '~/.openclaw/openclaw.json',
+      notes: 'Must use "api": "anthropic-messages" for Coding Plan keys. Proxy handles model prefix stripping (e.g. bailian/qwen3.7-plus → qwen3.7-plus) and API key replacement.',
     },
     'generic': {
       name: 'Any OpenAI-compatible CLI',
@@ -629,10 +631,12 @@ function handleProxyRequest(clientReq, clientRes, body, attempt) {
   }
 
   // Swap model
-  const originalModel = parsed.model || 'unknown';
+  // Strip provider prefix if present (e.g. "bailian/qwen3.7-plus" → "qwen3.7-plus")
+  const rawModel = parsed.model || 'unknown';
+  const originalModel = rawModel.includes('/') ? rawModel.split('/').pop() : rawModel;
   if (target.model !== originalModel) {
     parsed.model = target.model;
-    log('request', `${originalModel} → ${target.model} [P${target.providerIndex}] key=${maskKey(target.apiKey)}`);
+    log('request', `${rawModel} → ${target.model} [P${target.providerIndex}] key=${maskKey(target.apiKey)}`);
   } else {
     log('request', `[${attempt + 1}] ${clientReq.method} ${clientReq.url} model=${target.model} [P${target.providerIndex}] key=${maskKey(target.apiKey)}`);
   }
@@ -679,9 +683,9 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
       upstreamRes.on('end', () => {
         const resBody = Buffer.concat(resChunks);
 
-        if (statusCode === 429 && attempt < config.maxRetries) {
+        if (SWITCH_STATUS_CODES.has(statusCode) && attempt < config.maxRetries) {
           markTargetCooled(target.key, config);
-          log('rate-limited', `${targetLabel(target, config)} → cooldown ${config['limiter-recovery-seconds'] || 300}s`);
+          log('rate-limited', `${targetLabel(target, config)} → status ${statusCode}, cooldown ${config['limiter-recovery-seconds'] || 300}s`);
           log('info', `  Was: ${targetDetails(target)}`);
           const next = resolveTarget(config);
           if (next && next.key !== target.key) {
@@ -745,12 +749,12 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
  */
 function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalModel, target, config, attempt) {
   // 429 before stream starts — retry
-  if (upstreamRes.statusCode === 429 && attempt < config.maxRetries) {
+  if (SWITCH_STATUS_CODES.has(upstreamRes.statusCode) && attempt < config.maxRetries) {
     const chunks = [];
     upstreamRes.on('data', (c) => chunks.push(c));
     upstreamRes.on('end', () => {
       markTargetCooled(target.key, config);
-      log('rate-limited', `${targetLabel(target, config)} → cooldown (stream 429)`);
+      log('rate-limited', `${targetLabel(target, config)} → status ${upstreamRes.statusCode}, cooldown (stream)`);
       log('info', `  Was: ${targetDetails(target)}`);
       const next = resolveTarget(config);
       if (next && next.key !== target.key) {

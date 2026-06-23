@@ -39,8 +39,7 @@ PID_FILE="$SCRIPT_DIR/llm-proxy.pid"
 LOG_DIR="$SCRIPT_DIR/log"
 LOG_FILE="$LOG_DIR/llm-proxy.log"
 
-# ─── Stop command ──────────────────────────────────────────────
-if [ "$1" = "--stop" ] || [ "$1" = "-s" ]; then
+stop_proxy() {
     if [ -f "$PID_FILE" ]; then
         PID=$(cat "$PID_FILE")
         if kill -0 "$PID" 2>/dev/null; then
@@ -53,7 +52,20 @@ if [ "$1" = "--stop" ] || [ "$1" = "-s" ]; then
     else
         echo "  [WARN] No PID file found. Proxy may not be running."
     fi
+}
+
+# ─── Stop command ──────────────────────────────────────────────
+if [ "$1" = "--stop" ] || [ "$1" = "-s" ]; then
+    stop_proxy
     echo ""
+    exit 0
+fi
+
+# ─── Restart command ───────────────────────────────────────────
+if [ "$1" = "--restart" ] || [ "$1" = "-r" ]; then
+    stop_proxy
+    echo "  Restarting in background..."
+    "$0" -d
     exit 0
 fi
 
