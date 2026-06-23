@@ -112,12 +112,12 @@ Flattened target list (tried in order):
   [5] P2/deepseek-v4-pro
 ```
 
-**Rules:**
-1. Requests start with target [0] (P0's first model)
-2. 429 / 524 / 529 → target [0] enters cooldown, switch to [1]
-3. [1] also returns 429 / 524 / 529 / 524 / 529 → switch to [2] (new Provider + Key)
-4. Continue until a working combination is found
-5. After cooldown → target [0] recovers → auto-switch back
+**Rotation rules (dynamic queue algorithm):**
+1. Initial queue follows config order: P0/m0 → P0/m1 → P1/m0 → P1/m1 → ...
+2. Each request picks the first non-cooled target from the queue
+3. On error (429/524/529) → target enters cooldown → **moved to queue tail**
+4. Every `p0-reset-interval-seconds` (default 600s), all P0 targets are **reset to queue front**
+5. Cooled targets remain eligible after cooldown; P0 stays highest priority via periodic reset
 
 ### Request Lifecycle
 
@@ -328,6 +328,7 @@ Full config options:
 | `[].api-key` | — | Provider's API key |
 | `[].models` | — | Available models (priority order) |
 | `limiter-recovery-seconds` | `300` | Cooldown recovery time (seconds) |
+| `p0-reset-interval-seconds` | `600` | Interval to reset P0 targets to queue front (seconds) |
 | `port` | `9982` | Proxy listen port |
 | `bind` | `0.0.0.0` | Listen address (all interfaces) |
 | `maxRetries` | `20` | Max rotation attempts per request |
@@ -496,6 +497,10 @@ Changes to `config.json` take effect immediately — no restart needed.
 
 ### 2026-06-23
 
+- **New dynamic queue rotation algorithm**:
+  - Failed targets move to queue tail, all targets get rotated
+  - P0 targets reset to queue front every `p0-reset-interval-seconds` (default 600s), maintaining highest priority
+  - Brief cooldown preserved after errors to avoid immediate retries
 - Added automatic switching for HTTP 524 and 529:
   - `429`: quota / request rate exceeded
   - `524`: upstream response timeout

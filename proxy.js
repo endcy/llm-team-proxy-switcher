@@ -78,6 +78,7 @@ const DEFAULTS = {
   maxRetries: 20,
   requestTimeoutMs: 300000,
   'limiter-recovery-seconds': 300,
+  'p0-reset-interval-seconds': 600,
   providers: [],
 };
 
@@ -135,11 +136,60 @@ function buildTargets(config) {
 
 // ─── Rotation state ──────────────────────────────────────────────
 const state = {
-  /** Map<targetKey, cooldownExpiry timestamp> */
+  /** Dynamic target queue — order determines priority */
+  targetQueue: [],
+  /** Map<targetKey, cooldownExpiry timestamp> — brief cooldown after error */
   cooldowns: new Map(),
-  /** Current active target index (null = use primary) */
-  activeIndex: null,
+  /** Timer for periodic P0 reset */
+  p0ResetTimer: null,
+  /** Last config providers hash — for detecting config changes */
+  lastConfigHash: '',
 };
+
+/** Compute a simple hash of provider config to detect changes */
+function configHash(config) {
+  return JSON.stringify(config.providers.map(p => ({ url: p['base-url'], models: p.models })));
+}
+
+/** Initialize or rebuild the target queue from config */
+function ensureTargetQueue(config) {
+  const targets = buildTargets(config);
+  const hash = configHash(config);
+  if (state.lastConfigHash === hash && state.targetQueue.length > 0) return;
+  state.targetQueue = targets.map(t => t.key);
+  state.lastConfigHash = hash;
+}
+
+/** Move a target to the end of the queue (after error) */
+function moveTargetToEnd(targetKey) {
+  const idx = state.targetQueue.indexOf(targetKey);
+  if (idx >= 0) {
+    state.targetQueue.splice(idx, 1);
+    state.targetQueue.push(targetKey);
+  }
+}
+
+/** Move all P0 targets to the front of the queue */
+function resetP0ToFront(config) {
+  const targets = buildTargets(config);
+  const p0Keys = targets.filter(t => t.providerIndex === 0).map(t => t.key);
+  for (const key of p0Keys) {
+    const idx = state.targetQueue.indexOf(key);
+    if (idx >= 0) state.targetQueue.splice(idx, 1);
+  }
+  state.targetQueue.unshift(...p0Keys);
+  log('recovery', 'P0 targets reset to front of queue');
+}
+
+/** Start periodic P0 reset timer (every `p0-reset-interval-seconds` or default 600s) */
+function startP0ResetTimer(config) {
+  if (state.p0ResetTimer) clearInterval(state.p0ResetTimer);
+  const intervalSec = config['p0-reset-interval-seconds'] || 600;
+  state.p0ResetTimer = setInterval(() => {
+    const cfg = loadConfig();
+    resetP0ToFront(cfg);
+  }, intervalSec * 1000);
+}
 
 function targetLabel(target, config) {
   const pName = `P${target.providerIndex}`;
@@ -148,61 +198,53 @@ function targetLabel(target, config) {
 
 /**
  * Resolve the best target to use right now.
- * Priority: primary (index 0) → same provider next model → next provider → ...
- * After recovery, reset to primary.
+ * Uses dynamic queue: picks first non-cooled target from queue.
+ * After error, target moves to queue tail.
+ * P0 targets are periodically reset to queue front.
  */
 function resolveTarget(config) {
+  ensureTargetQueue(config);
   const targets = buildTargets(config);
   if (targets.length === 0) return null;
 
   const now = Date.now();
-  const recoveryMs = (config['limiter-recovery-seconds'] || 300) * 1000;
 
   // Expire old cooldowns
   for (const [key, expiry] of state.cooldowns) {
     if (expiry <= now) state.cooldowns.delete(key);
   }
 
-  // Check if primary target (index 0) is available
-  const primary = targets[0];
-  const primaryCooled = (state.cooldowns.get(primary.key) || 0) > now;
-
-  if (!primaryCooled) {
-    if (state.activeIndex !== null && state.activeIndex !== 0) {
-      log('recovery', `Primary recovered → ${targetLabel(primary, config)}`);
-      log('info', `  Target: ${targetDetails(primary)}`);
-    }
-    state.activeIndex = null;
-    return primary;
-  }
-
-  // Primary is cooled — find next available target in order
-  for (let i = 1; i < targets.length; i++) {
-    const t = targets[i];
-    if ((state.cooldowns.get(t.key) || 0) <= now) {
-      if (state.activeIndex !== i) {
-        state.activeIndex = i;
-        log('switch', `${targetLabel(primary, config)} → ${targetLabel(t, config)}`);
-        log('info', `  New target: ${targetDetails(t)}`);
-      }
-      return t;
+  // Find first non-cooled target in queue order
+  for (const key of state.targetQueue) {
+    if ((state.cooldowns.get(key) || 0) <= now) {
+      const target = targets.find(t => t.key === key);
+      if (target) return target;
     }
   }
 
   // All targets cooled — find earliest recovery
   let earliest = Infinity;
-  for (const t of targets) {
-    const expiry = state.cooldowns.get(t.key) || 0;
+  for (const [key, expiry] of state.cooldowns) {
     if (expiry > now && expiry < earliest) earliest = expiry;
   }
-  const waitSec = Math.ceil((earliest - now) / 1000);
-  log('warn', `All targets in cooldown. Earliest recovery in ${waitSec}s`);
-  return primary; // fallback, let it fail naturally
+  if (earliest !== Infinity) {
+    const waitSec = Math.ceil((earliest - now) / 1000);
+    log('warn', `All targets in cooldown. Earliest recovery in ${waitSec}s`);
+  }
+
+  // Fallback: return first target, let it fail naturally
+  return targets[0] || null;
 }
 
+/**
+ * Called when a target gets 429/524/529:
+ * 1. Set brief cooldown so it's not retried immediately
+ * 2. Move to end of queue so other targets get tried first
+ */
 function markTargetCooled(targetKey, config) {
   const recoverySec = config['limiter-recovery-seconds'] || 300;
   state.cooldowns.set(targetKey, Date.now() + recoverySec * 1000);
+  moveTargetToEnd(targetKey);
 }
 
 function getCoolingTargets(config) {
@@ -272,7 +314,12 @@ function logToFile(type, msg) {
     }
 
     const now = new Date();
-    const ts = now.toISOString().replace('T', ' ').substring(0, 19);
+    const ts = now.getFullYear()
+      + '-' + String(now.getMonth() + 1).padStart(2, '0')
+      + '-' + String(now.getDate()).padStart(2, '0') + ' '
+      + String(now.getHours()).padStart(2, '0') + ':'
+      + String(now.getMinutes()).padStart(2, '0') + ':'
+      + String(now.getSeconds()).padStart(2, '0');
     const plain = stripAnsi(msg);
     const line = `[${ts}] [${type}] ${plain}\n`;
     fs.appendFileSync(LOG_FILE, line, 'utf-8');
@@ -937,11 +984,14 @@ server.listen(config.port, config.bind, () => {
   }
   log('ok', `Web UI: ${displayUrl}/`);
   log('ok', `${config.providers.length} provider(s), ${buildTargets(config).length} target(s)`);
+  log('ok', `P0 reset interval: ${config['p0-reset-interval-seconds'] || 600}s`);
+  startP0ResetTimer(config);
 });
 
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log(`\n${C.yellow}Shutting down...${C.reset}`);
+  if (state.p0ResetTimer) clearInterval(state.p0ResetTimer);
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 3000);
 });
