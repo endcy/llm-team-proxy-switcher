@@ -177,11 +177,53 @@ textarea#editor::selection{background:rgba(59,130,246,.3)}
 const editor = document.getElementById('editor');
 const validation = document.getElementById('validation');
 
+// Full config kept in memory (never shown in editor)
+let savedConfig = null;
+
+/** Mask an API key: show first 6 and last 4 chars, mask middle */
+function maskKey(key) {
+  if (!key || typeof key !== 'string' || key.length <= 10) return '***';
+  return key.slice(0, 6) + '***' + key.slice(-4);
+}
+
+/** Recursively walk object, mask "api-key" fields */
+function maskApiKeys(obj) {
+  if (Array.isArray(obj)) return obj.map(maskApiKeys);
+  if (obj && typeof obj === 'object') {
+    const out = {};
+    for (const k of Object.keys(obj)) {
+      out[k] = k === 'api-key' ? maskKey(obj[k]) : maskApiKeys(obj[k]);
+    }
+    return out;
+  }
+  return obj;
+}
+
+/** Restore masked keys from savedConfig when parsing textarea JSON */
+function restoreApiKeys(textareaObj, fullObj) {
+  if (!fullObj || !textareaObj) return textareaObj;
+  if (Array.isArray(textareaObj)) {
+    return textareaObj.map((v, i) => restoreApiKeys(v, fullObj[i]));
+  }
+  if (textareaObj && typeof textareaObj === 'object') {
+    const out = {};
+    for (const k of Object.keys(textareaObj)) {
+      if (k === 'api-key' && typeof textareaObj[k] === 'string' && textareaObj[k].includes('***')) {
+        out[k] = fullObj[k] || textareaObj[k];
+      } else {
+        out[k] = restoreApiKeys(textareaObj[k], fullObj[k]);
+      }
+    }
+    return out;
+  }
+  return textareaObj;
+}
+
 async function loadConfig() {
   try {
     const res = await fetch('/api/config');
-    const data = await res.json();
-    editor.value = JSON.stringify(data, null, 2);
+    savedConfig = await res.json();
+    editor.value = JSON.stringify(maskApiKeys(savedConfig), null, 2);
     validate();
   } catch (err) {
     showToast('Failed to load config: ' + err.message, 'error');
@@ -195,10 +237,11 @@ async function saveConfig() {
 
   try {
     const parsed = JSON.parse(editor.value);
+    const fullPayload = restoreApiKeys(parsed, savedConfig);
     const res = await fetch('/api/config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(parsed, null, 2),
+      body: JSON.stringify(fullPayload, null, 2),
     });
 
     if (!res.ok) {
@@ -206,6 +249,8 @@ async function saveConfig() {
       throw new Error(err.error || 'Save failed');
     }
 
+    savedConfig = fullPayload;
+    editor.value = JSON.stringify(maskApiKeys(savedConfig), null, 2);
     showToast('Config saved successfully', 'success');
     validate();
   } catch (err) {
