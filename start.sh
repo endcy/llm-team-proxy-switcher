@@ -39,18 +39,41 @@ PID_FILE="$SCRIPT_DIR/llm-proxy.pid"
 LOG_DIR="$SCRIPT_DIR/log"
 LOG_FILE="$LOG_DIR/llm-proxy.log"
 
+PORT=$(grep -oE '"port"[[:space:]]*:[[:space:]]*[0-9]+' "$SCRIPT_DIR/config.json" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+PORT=${PORT:-9982}
+
 stop_proxy() {
+    local stopped=0
+
+    # 1. Try PID file first
     if [ -f "$PID_FILE" ]; then
         PID=$(cat "$PID_FILE")
         if kill -0 "$PID" 2>/dev/null; then
             kill "$PID"
-            echo "  [OK] Proxy stopped (PID $PID)."
-        else
-            echo "  [WARN] Proxy not running (stale PID file removed)."
+            sleep 1
+            kill -0 "$PID" 2>/dev/null && kill -9 "$PID" 2>/dev/null
+            echo "  [OK] Proxy stopped via PID file (PID $PID)."
+            stopped=1
         fi
         rm -f "$PID_FILE"
-    else
-        echo "  [WARN] No PID file found. Proxy may not be running."
+    fi
+
+    # 2. Fallback: find by port (covers manual nohup start)
+    if [ "$stopped" -eq 0 ] && command -v lsof &>/dev/null; then
+        PIDS=$(lsof -ti :"$PORT" 2>/dev/null)
+        if [ -n "$PIDS" ]; then
+            for P in $PIDS; do
+                kill "$P" 2>/dev/null
+                sleep 1
+                kill -0 "$P" 2>/dev/null && kill -9 "$P" 2>/dev/null
+                echo "  [OK] Proxy stopped via port :$PORT (PID $P)."
+                stopped=1
+            done
+        fi
+    fi
+
+    if [ "$stopped" -eq 0 ]; then
+        echo "  [INFO] No running proxy found."
     fi
 }
 

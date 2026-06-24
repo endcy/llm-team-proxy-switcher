@@ -765,8 +765,8 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
   if (reqPath.startsWith('/v1/chat/completions') && target.openaiBaseUrl) {
     effectiveBase = target.openaiBaseUrl.replace(/\/+$/, '');
     log('info', `  OpenAI format → using openai-base-url: ${effectiveBase}`);
-    // openai-base-url already contains /v1, strip it from path to avoid /v1/v1/...
-    if (effectiveBase.endsWith('/v1')) {
+    // openai-base-url already contains a version path (/v1, /v2, /v3, etc.), strip /v1 from request path
+    if (/\/v\d+$/.test(effectiveBase)) {
       pathForUpstream = reqPath.replace(/^\/v1/, '');
     }
   }
