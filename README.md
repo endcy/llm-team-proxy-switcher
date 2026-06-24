@@ -73,6 +73,7 @@
 | **Codex (OpenAI)** | ✅ 已支持 | OpenAI 兼容格式，原理相同 |
 | **Cursor** | 🔜 计划中 | 原理相同，待验证 |
 | **OpenClaw** | ✅ 已支持 | 自动剥离 provider 前缀（如 bailian/qwen3.7-plus）|
+| **WorkBuddy** | ✅ 已支持 | OpenAI 格式，自动路由到 openai-base-url |
 | 其他 OpenAI / Anthropic 兼容 CLI | ✅ 已支持 | 任何支持自定义 API Base URL 的客户端均可使用 |
 
 ## 工作原理
@@ -497,15 +498,32 @@ API Key:   dummy（任意非空值）
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
 | `providers` | _(必填)_ | Provider 配置数组 |
-| `[].base-url` | — | 该 Provider 的 API 地址 |
+| `[].base-url` | — | 该 Provider 的 API 地址（Anthropic 格式，用于 `/v1/messages`） |
+| `[].openai-base-url` | _(可选)_ | OpenAI 格式地址（用于 `/v1/chat/completions`，不配则回退到 `base-url`） |
 | `[].api-key` | — | 该 Provider 的 API Key |
 | `[].models` | — | 该 Provider 可用模型列表（按优先级排列） |
+| `[].openai-models` | _(可选)_ | OpenAI 格式专用模型列表。配了就用此列表，没配则 `models` 兼容两种格式，空列表 `[]` 表示该 provider 不支持 OpenAI 格式 |
 | `limiter-recovery-seconds` | `300` | 限流冷却恢复时间（秒） |
 | `p0-reset-interval-seconds` | `600` | P0 目标重置到队列头部的间隔（秒） |
 | `port` | `9982` | 代理监听端口 |
 | `bind` | `0.0.0.0` | 监听地址（`0.0.0.0` = 内网可访问，`127.0.0.1` = 仅本机） |
 | `maxRetries` | `20` | 每次请求最大轮询次数 |
 | `requestTimeoutMs` | `300000` | 上游请求超时（毫秒） |
+
+### 双格式路由说明
+
+代理同时支持 **Anthropic**（`/v1/messages`）和 **OpenAI**（`/v1/chat/completions`）两种 API 格式，各自维护独立的轮询队列：
+
+| 客户端请求路径 | 使用地址 | 使用模型列表 |
+|--------------|---------|------------|
+| `/v1/messages` (Anthropic) | `base-url` | `models` |
+| `/v1/chat/completions` (OpenAI) | `openai-base-url`（如有） | `openai-models`（如有） |
+
+- 没配 `openai-base-url` → OpenAI 请求也走 `base-url`
+- 没配 `openai-models` → `models` 兼容两种格式
+- `openai-models: []` → 该 provider 不支持 OpenAI 格式，自动跳过
+
+路径补全规则：请求路径不带 `/v1` 前缀时自动补全；若 `openai-base-url` 已含 `/v1` 则不重复添加。
 
 ### 2. 设置环境变量
 

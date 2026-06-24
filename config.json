@@ -4,29 +4,55 @@
   "maxRetries": 20,
   "requestTimeoutMs": 300000,
   "limiter-recovery-seconds": 300,
+  "p0-reset-interval-seconds": 600,
   "providers": [
     {
       "base-url": "https://coding.dashscope.aliyuncs.com/apps/anthropic",
-      "api-key": "sk-sp-one-key",
+      "openai-base-url": "https://coding.dashscope.aliyuncs.com/v1",
+      "api-key": "sk-sp-YOUR KEY",
       "models": [
         "qwen3.7-plus",
         "qwen3.6-plus"
       ]
     },
     {
-      "base-url": "https://opencode.ai/zen/go",
-      "api-key": "sk-two-key",
+      "base-url": "https://ark.cn-beijing.volces.com/api/coding",
+      "openai-base-url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+      "api-key": "ark-YOUR KEY",
+      "models": [
+        "glm-5.2",
+        "glm-5.1"
+      ]
+    },
+    {
+      "base-url": "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic",
+      "openai-base-url": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      "api-key": "sk-sp-YOUR KEY",
       "models": [
         "qwen3.7-plus",
+        "glm-5.2"
+      ]
+    },
+    {
+      "base-url": "https://opencode.ai/zen/go",
+      "openai-base-url": "https://opencode.ai/zen/go",
+      "api-key": "sk-YOUR KEY",
+      "models": [
+        "qwen3.7-plus",
+        "qwen3.7-max"
+      ],
+      "openai-models": [
+        "glm-5.2",
         "deepseek-v4-pro"
       ]
     },
     {
       "base-url": "https://ark.cn-beijing.volces.com/api/coding",
-      "api-key": "sk-three-key",
+      "openai-base-url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+      "api-key": "ark-YOUR KEY",
       "models": [
-        "qwen3.6-plus",
-        "deepseek-v4-pro"
+        "glm-5.2",
+        "glm-5.1"
       ]
     }
   ]

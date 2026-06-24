@@ -71,6 +71,7 @@ How it compares to similar tools:
 | **Codex (OpenAI)** | ✅ Supported | OpenAI-compatible format |
 | **Cursor** | 🔜 Planned | Same principle, pending verification |
 | **OpenClaw** | ✅ Supported | Auto-strips provider prefix (e.g. bailian/qwen3.7-plus) |
+| **WorkBuddy** | ✅ Supported | OpenAI format, auto-routes to openai-base-url |
 | Other OpenAI / Anthropic-compatible CLI | ✅ Supported | Any client with custom API Base URL support |
 
 ---
@@ -327,12 +328,28 @@ Full config options:
 | `[].base-url` | — | Provider's API base URL |
 | `[].api-key` | — | Provider's API key |
 | `[].models` | — | Available models (priority order) |
+| `[].openai-models` | _(optional)_ | OpenAI-format model list. If set, used for OpenAI requests; if missing, `models` is used for both formats; empty list `[]` means no OpenAI support for this provider |
 | `limiter-recovery-seconds` | `300` | Cooldown recovery time (seconds) |
 | `p0-reset-interval-seconds` | `600` | Interval to reset P0 targets to queue front (seconds) |
 | `port` | `9982` | Proxy listen port |
 | `bind` | `0.0.0.0` | Listen address (all interfaces) |
 | `maxRetries` | `20` | Max rotation attempts per request |
 | `requestTimeoutMs` | `300000` | Upstream timeout (ms) |
+
+### Dual-Format Routing
+
+The proxy supports both **Anthropic** (`/v1/messages`) and **OpenAI** (`/v1/chat/completions`) API formats, with independent rotation queues for each:
+
+| Client Request Path | Base URL Used | Model List Used |
+|--------------------|---------------|----------------|
+| `/v1/messages` (Anthropic) | `base-url` | `models` |
+| `/v1/chat/completions` (OpenAI) | `openai-base-url` (if set) | `openai-models` (if set) |
+
+- No `openai-base-url` → OpenAI requests also use `base-url`
+- No `openai-models` → `models` is used for both formats
+- `openai-models: []` → this provider does not support OpenAI format, skipped automatically
+
+Path normalization: `/v1` prefix is auto-added if missing; if `openai-base-url` already ends with `/v1`, it's not duplicated.
 
 ### 2. Set Environment Variable
 

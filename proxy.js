@@ -116,16 +116,35 @@ function stripJsonComments(text) {
  * Example with 2 providers × 2 models:
  *   [0] P0-M0  [1] P0-M1  [2] P1-M0  [3] P1-M1
  */
-function buildTargets(config) {
+/**
+ * Build target list from config.
+ * @param {string} format - 'anthropic' or 'openai'
+ * If provider has 'openai-models', use it for openai format; otherwise use 'models' for both.
+ */
+function buildTargets(config, format) {
+  format = format || 'anthropic';
   const targets = [];
   for (let pi = 0; pi < config.providers.length; pi++) {
     const p = config.providers[pi];
-    const models = p.models || [];
+    // Choose model list based on format
+    let models;
+    if (format === 'openai') {
+      // If openai-models is explicitly defined (even empty), use it
+      if ('openai-models' in p) {
+        models = p['openai-models'] || [];
+      } else {
+        // No openai-models field → models supports both formats
+        models = p.models || [];
+      }
+    } else {
+      models = p.models || [];
+    }
     for (const model of models) {
       targets.push({
         providerIndex: pi,
         model,
         baseUrl: p['base-url'],
+        openaiBaseUrl: p['openai-base-url'] || '',
         apiKey: p['api-key'],
         key: `${pi}::${model}`,
       });
@@ -136,8 +155,8 @@ function buildTargets(config) {
 
 // ─── Rotation state ──────────────────────────────────────────────
 const state = {
-  /** Dynamic target queue — order determines priority */
-  targetQueue: [],
+  /** Per-format dynamic queues: { anthropic: [keys], openai: [keys] } */
+  targetQueues: { anthropic: [], openai: [] },
   /** Map<targetKey, cooldownExpiry timestamp> — brief cooldown after error */
   cooldowns: new Map(),
   /** Timer for periodic P0 reset */
@@ -148,36 +167,50 @@ const state = {
 
 /** Compute a simple hash of provider config to detect changes */
 function configHash(config) {
-  return JSON.stringify(config.providers.map(p => ({ url: p['base-url'], models: p.models })));
+  return JSON.stringify(config.providers.map(p => ({
+    url: p['base-url'],
+    openaiUrl: p['openai-base-url'] || '',
+    models: p.models,
+    openaiModels: 'openai-models' in p ? p['openai-models'] : null,
+  })));
 }
 
-/** Initialize or rebuild the target queue from config */
+/** Initialize or rebuild the per-format target queues from config */
 function ensureTargetQueue(config) {
-  const targets = buildTargets(config);
   const hash = configHash(config);
-  if (state.lastConfigHash === hash && state.targetQueue.length > 0) return;
-  state.targetQueue = targets.map(t => t.key);
+  if (state.lastConfigHash === hash &&
+      (state.targetQueues.anthropic.length > 0 || state.targetQueues.openai.length > 0)) {
+    return;
+  }
+  state.targetQueues.anthropic = buildTargets(config, 'anthropic').map(t => t.key);
+  state.targetQueues.openai = buildTargets(config, 'openai').map(t => t.key);
   state.lastConfigHash = hash;
 }
 
-/** Move a target to the end of the queue (after error) */
+/** Move a target to the end of all queues (after error) */
 function moveTargetToEnd(targetKey) {
-  const idx = state.targetQueue.indexOf(targetKey);
-  if (idx >= 0) {
-    state.targetQueue.splice(idx, 1);
-    state.targetQueue.push(targetKey);
+  for (const fmt of ['anthropic', 'openai']) {
+    const q = state.targetQueues[fmt];
+    const idx = q.indexOf(targetKey);
+    if (idx >= 0) {
+      q.splice(idx, 1);
+      q.push(targetKey);
+    }
   }
 }
 
-/** Move all P0 targets to the front of the queue */
+/** Move all P0 targets to the front of all queues */
 function resetP0ToFront(config) {
-  const targets = buildTargets(config);
-  const p0Keys = targets.filter(t => t.providerIndex === 0).map(t => t.key);
-  for (const key of p0Keys) {
-    const idx = state.targetQueue.indexOf(key);
-    if (idx >= 0) state.targetQueue.splice(idx, 1);
+  for (const fmt of ['anthropic', 'openai']) {
+    const targets = buildTargets(config, fmt);
+    const p0Keys = targets.filter(t => t.providerIndex === 0).map(t => t.key);
+    const q = state.targetQueues[fmt];
+    for (const key of p0Keys) {
+      const idx = q.indexOf(key);
+      if (idx >= 0) q.splice(idx, 1);
+    }
+    q.unshift(...p0Keys);
   }
-  state.targetQueue.unshift(...p0Keys);
   log('recovery', 'P0 targets reset to front of queue');
 }
 
@@ -202,11 +235,13 @@ function targetLabel(target, config) {
  * After error, target moves to queue tail.
  * P0 targets are periodically reset to queue front.
  */
-function resolveTarget(config) {
+function resolveTarget(config, format) {
+  format = format || 'anthropic';
   ensureTargetQueue(config);
-  const targets = buildTargets(config);
+  const targets = buildTargets(config, format);
   if (targets.length === 0) return null;
 
+  const queue = state.targetQueues[format] || [];
   const now = Date.now();
 
   // Expire old cooldowns
@@ -215,7 +250,7 @@ function resolveTarget(config) {
   }
 
   // Find first non-cooled target in queue order
-  for (const key of state.targetQueue) {
+  for (const key of queue) {
     if ((state.cooldowns.get(key) || 0) <= now) {
       const target = targets.find(t => t.key === key);
       if (target) return target;
@@ -229,11 +264,17 @@ function resolveTarget(config) {
   }
   if (earliest !== Infinity) {
     const waitSec = Math.ceil((earliest - now) / 1000);
-    log('warn', `All targets in cooldown. Earliest recovery in ${waitSec}s`);
+    log('warn', `All ${format} targets in cooldown. Earliest recovery in ${waitSec}s`);
   }
 
   // Fallback: return first target, let it fail naturally
   return targets[0] || null;
+}
+
+/** Detect request format from URL path */
+function detectFormat(reqUrl) {
+  if (reqUrl.includes('/chat/completions')) return 'openai';
+  return 'anthropic';
 }
 
 /**
@@ -455,18 +496,30 @@ function getCliSetupData(proxyUrl, defaultModel) {
         'models.providers.<name>.apiKey': 'dummy',
       },
       configFile: '~/.openclaw/openclaw.json',
-      notes: 'Must use "api": "anthropic-messages" for Coding Plan keys. Proxy handles model prefix stripping (e.g. bailian/qwen3.7-plus → qwen3.7-plus) and API key replacement.',
+      notes: 'Coding Plan keys require "api": "anthropic-messages". Proxy strips provider prefixes (bailian/qwen3.7-plus → qwen3.7-plus), replaces API keys, and routes OpenAI format (/v1/chat/completions) to openai-base-url.',
+    },
+    'workbuddy': {
+      name: 'WorkBuddy',
+      status: 'supported',
+      icon: '',
+      env: {
+        'API Base URL': proxyUrl,
+        'API Key': 'dummy (any non-empty value)',
+      },
+      configFile: 'WorkBuddy Settings',
+      notes: 'Sends OpenAI format (/v1/chat/completions). Proxy auto-routes to openai-base-url. Just set the base URL to the proxy address.',
     },
     'generic': {
-      name: 'Any OpenAI-compatible CLI',
+      name: 'Any OpenAI / Anthropic CLI',
       status: 'supported',
       icon: '🟢',
       env: {
-        OPENAI_BASE_URL: proxyUrl + '/v1',
-        OPENAI_API_KEY: 'dummy',
+        'OpenAI format': proxyUrl + '/v1  (e.g. /v1/chat/completions)',
+        'Anthropic format': proxyUrl + '  (e.g. /v1/messages)',
+        'API Key': 'dummy (any non-empty value)',
       },
       configFile: 'Tool-specific',
-      notes: 'Any tool supporting custom OpenAI Base URL works. Set API key to any non-empty value.',
+      notes: 'Proxy auto-detects format from request path. OpenAI requests route to openai-base-url if configured. No client-side changes needed beyond base URL.',
     },
   };
 }
@@ -661,17 +714,18 @@ function handleProxyRequest(clientReq, clientRes, body, attempt) {
   let parsed;
   try {
     parsed = JSON.parse(body.toString('utf-8'));
-  } catch {
-    log('error', 'Invalid JSON in request body');
+  } catch (e) {
+    log('warn', `Skip non-JSON body (${body.length}B) from ${clientReq.url}`);
     clientRes.writeHead(400, { 'Content-Type': 'application/json' });
-    clientRes.end(JSON.stringify({ error: { type: 'invalid_request_error', message: 'Invalid JSON' } }));
+    clientRes.end(JSON.stringify({ error: { type: 'invalid_request_error', message: 'Invalid request body' } }));
     return;
   }
 
-  // Resolve target (provider + model)
-  const target = resolveTarget(config);
+  // Detect request format and resolve target accordingly
+  const format = detectFormat(clientReq.url);
+  const target = resolveTarget(config, format);
   if (!target) {
-    log('error', 'No providers configured in config.json');
+    log('error', `No providers configured for ${format} format in config.json`);
     clientRes.writeHead(500, { 'Content-Type': 'application/json' });
     clientRes.end(JSON.stringify({ error: { type: 'config_error', message: 'No providers configured' } }));
     return;
@@ -697,8 +751,27 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
   // baseUrl may have a path (e.g. https://opencode.ai/zen/go)
   // clientReq.url starts with / (e.g. /v1/messages?beta=true)
   const base = target.baseUrl.replace(/\/+$/, '');          // strip trailing slash
-  const reqPath = clientReq.url;                             // e.g. /v1/messages?beta=true
-  const fullUrl = base + reqPath;
+  let reqPath = clientReq.url;                             // e.g. /v1/messages?beta=true
+  // Normalize: if path doesn't start with /v1/, prepend /v1
+  if (!reqPath.startsWith('/v1/') && !reqPath.startsWith('/v1?')) {
+    reqPath = '/v1' + reqPath;
+  }
+
+  // Choose base URL based on request format
+  // /v1/chat/completions → OpenAI format → use openai-base-url if configured
+  // /v1/messages → Anthropic format → use base-url
+  let effectiveBase = base;
+  let pathForUpstream = reqPath;
+  if (reqPath.startsWith('/v1/chat/completions') && target.openaiBaseUrl) {
+    effectiveBase = target.openaiBaseUrl.replace(/\/+$/, '');
+    log('info', `  OpenAI format → using openai-base-url: ${effectiveBase}`);
+    // openai-base-url already contains /v1, strip it from path to avoid /v1/v1/...
+    if (effectiveBase.endsWith('/v1')) {
+      pathForUpstream = reqPath.replace(/^\/v1/, '');
+    }
+  }
+
+  const fullUrl = effectiveBase + pathForUpstream;
   const upstreamUrl = new URL(fullUrl);
   const isHttps = upstreamUrl.protocol === 'https:';
   const transport = isHttps ? https : http;
@@ -734,7 +807,7 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
           markTargetCooled(target.key, config);
           log('rate-limited', `${targetLabel(target, config)} → status ${statusCode}, cooldown ${config['limiter-recovery-seconds'] || 300}s`);
           log('info', `  Was: ${targetDetails(target)}`);
-          const next = resolveTarget(config);
+          const next = resolveTarget(config, detectFormat(clientReq.url));
           if (next && next.key !== target.key) {
             log('retry', `Retrying with ${targetLabel(next, config)}...`);
             log('info', `  Now: ${targetDetails(next)}`);
@@ -760,7 +833,7 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
     log('error', `Upstream connection error: ${err.message}`);
     if (!clientRes.headersSent && attempt < config.maxRetries) {
       markTargetCooled(target.key, config);
-      const next = resolveTarget(config);
+      const next = resolveTarget(config, detectFormat(clientReq.url));
       if (next && next.key !== target.key) {
         log('retry', `Connection failed, retrying with ${targetLabel(next, config)}...`);
         retryWithTarget(clientReq, clientRes, body, originalModel, next, config, attempt);
@@ -803,7 +876,7 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
       markTargetCooled(target.key, config);
       log('rate-limited', `${targetLabel(target, config)} → status ${upstreamRes.statusCode}, cooldown (stream)`);
       log('info', `  Was: ${targetDetails(target)}`);
-      const next = resolveTarget(config);
+      const next = resolveTarget(config, detectFormat(clientReq.url));
       if (next && next.key !== target.key) {
         log('retry', `Stream got 429, retrying with ${targetLabel(next, config)}...`);
         log('info', `  Now: ${targetDetails(next)}`);
@@ -817,7 +890,14 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
   }
 
   // Forward streaming headers to client
-  clientRes.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+  // Explicitly set chunked encoding and close connection so client knows stream is done
+  const streamHeaders = {
+    'Content-Type': upstreamRes.headers['content-type'] || 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'close',
+    'Transfer-Encoding': 'chunked',
+  };
+  clientRes.writeHead(upstreamRes.statusCode, streamHeaders);
 
   // Stream data through
   upstreamRes.on('data', (chunk) => {
