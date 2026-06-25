@@ -505,6 +505,8 @@ API Key:   dummy（任意非空值）
 | `[].openai-models` | _(可选)_ | OpenAI 格式专用模型列表。配了就用此列表，没配则 `models` 兼容两种格式，空列表 `[]` 表示该 provider 不支持 OpenAI 格式 |
 | `limiter-recovery-seconds` | `300` | 限流冷却恢复时间（秒） |
 | `p0-reset-interval-seconds` | `600` | P0 目标重置到队列头部的间隔（秒） |
+| `logDebug` | `false` | 是否打印调试日志（如 image_url 位置信息） |
+| `textOnlyModels` | `["deepseek-v4-pro","deepseek-v4-flash","deepseek-v3.2"]` | 纯文本模型列表。代理在转发请求给这些模型前，会**自动剥离**图片（`image`/`image_url`）、文档（`document`）、base64 等多模态内容，避免模型报错 |
 | `port` | `9982` | 代理监听端口 |
 | `bind` | `0.0.0.0` | 监听地址（`0.0.0.0` = 内网可访问，`127.0.0.1` = 仅本机） |
 | `maxRetries` | `20` | 每次请求最大轮询次数 |

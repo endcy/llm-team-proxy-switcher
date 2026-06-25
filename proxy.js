@@ -79,6 +79,8 @@ const DEFAULTS = {
   requestTimeoutMs: 300000,
   'limiter-recovery-seconds': 300,
   'p0-reset-interval-seconds': 600,
+  logDebug: false,
+  textOnlyModels: ['deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-v3.2'],
   providers: [],
 };
 
@@ -742,6 +744,15 @@ function handleProxyRequest(clientReq, clientRes, body, attempt) {
     log('request', `[${attempt + 1}] ${clientReq.method} ${clientReq.url} model=${target.model} [P${target.providerIndex}] key=${maskKey(target.apiKey)}`);
   }
 
+  // Strip Claude Code-specific fields that non-Anthropic upstreams (e.g. LiteLLM) don't understand
+  delete parsed['output_config'];
+  delete parsed['context_management'];
+
+  // Text-only models cannot handle image/document/base64 content; sanitize before forwarding.
+  if (isTextOnlyModel(target.model)) {
+    sanitizeTextOnlyRequest(parsed, config);
+  }
+
   const newBody = Buffer.from(JSON.stringify(parsed), 'utf-8');
   proxyToUpstream(clientReq, clientRes, newBody, originalModel, target, config, attempt);
 }
@@ -779,6 +790,10 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
   // Build headers — forward all except host, inject provider's API key
   let headers = { ...clientReq.headers };
   delete headers.host;
+  // Strip Anthropic-specific headers that may cause compatibility issues
+  // with non-Anthropic upstreams (e.g. LiteLLM)
+  delete headers['anthropic-beta'];
+  delete headers['anthropic-version'];
   headers['content-length'] = String(body.length);
   headers = injectApiKey(headers, target.apiKey);
 
@@ -812,6 +827,16 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
             log('retry', `Retrying with ${targetLabel(next, config)}...`);
             log('info', `  Now: ${targetDetails(next)}`);
             retryWithTarget(clientReq, clientRes, body, originalModel, next, config, attempt);
+            return;
+          }
+        }
+
+        // Handle 400 error due to unsupported content format
+        if (isImageUnsupportedError(statusCode, resBody) && attempt < config.maxRetries) {
+          const strippedBody = stripImageContent(body, config);
+          if (strippedBody) {
+            log('retry', `Retrying with fixed content format...`);
+            proxyToUpstream(clientReq, clientRes, strippedBody, originalModel, target, config, attempt + 1);
             return;
           }
         }
@@ -866,6 +891,7 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
 /**
  * Handle SSE streaming response.
  * If 429 is received before streaming starts, retry with next target.
+ * If 400 with image_url error, strip images and retry.
  */
 function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalModel, target, config, attempt) {
   // 429 before stream starts — retry
@@ -885,6 +911,26 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
       }
       clientRes.writeHead(429, upstreamRes.headers);
       clientRes.end(Buffer.concat(chunks));
+    });
+    return;
+  }
+
+  // 400 with content format error before stream starts — fix and retry
+  if (upstreamRes.statusCode === 400 && attempt < config.maxRetries) {
+    const chunks = [];
+    upstreamRes.on('data', (c) => chunks.push(c));
+    upstreamRes.on('end', () => {
+      const resBody = Buffer.concat(chunks);
+      if (isImageUnsupportedError(400, resBody)) {
+        const strippedBody = stripImageContent(body);
+        if (strippedBody) {
+          log('retry', `Stream got content error, retrying with fixed format...`);
+          proxyToUpstream(clientReq, clientRes, strippedBody, originalModel, target, config, attempt + 1);
+          return;
+        }
+      }
+      clientRes.writeHead(400, upstreamRes.headers);
+      clientRes.end(resBody);
     });
     return;
   }
@@ -917,6 +963,124 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
   clientReq.on('close', () => {
     upstreamRes.destroy();
   });
+}
+
+/** Check if model is text-only and should not receive images/documents */
+function isTextOnlyModel(model) {
+  const cfg = loadConfig();
+  const textOnly = cfg.textOnlyModels || [];
+  return textOnly.includes(model);
+}
+
+/** Recursively sanitize unsupported multimodal blocks for text-only models */
+function sanitizeValueForTextOnly(value, state) {
+  if (Array.isArray(value)) {
+    const out = [];
+    for (const item of value) {
+      if (item && typeof item === 'object') {
+        const t = item.type;
+        if (t === 'image' || t === 'image_url' || t === 'document') {
+          state.changed = true;
+          continue;
+        }
+        if (t === 'tool_result' && typeof item.content === 'string') {
+          out.push({ ...item, content: [{ type: 'text', text: item.content }] });
+          state.changed = true;
+          continue;
+        }
+      }
+      out.push(sanitizeValueForTextOnly(item, state));
+    }
+    return out.length > 0 ? out : [{ type: 'text', text: '' }];
+  }
+  if (value && typeof value === 'object') {
+    if (value.type === 'image' || value.type === 'image_url' || value.type === 'document') {
+      state.changed = true;
+      return { type: 'text', text: '' };
+    }
+    if (value.source && value.source.type === 'base64') {
+      state.changed = true;
+      return { type: 'text', text: '' };
+    }
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (k === 'image_url' || k === 'source') {
+        state.changed = true;
+        continue;
+      }
+      out[k] = sanitizeValueForTextOnly(v, state);
+    }
+    return out;
+  }
+  return value;
+}
+
+function sanitizeTextOnlyRequest(parsed, config) {
+  const state = { changed: false };
+  if (parsed.messages) parsed.messages = sanitizeValueForTextOnly(parsed.messages, state);
+  if (parsed.system) parsed.system = sanitizeValueForTextOnly(parsed.system, state);
+  if (state.changed) log('warn', 'Sanitized multimodal content for text-only model');
+}
+
+/** Check if 400 error is due to unsupported image content */
+function isImageUnsupportedError(statusCode, body) {
+  if (statusCode !== 400) return false;
+  const text = body.toString('utf-8');
+  return text.includes('image_url') && (text.includes('unknown variant') || text.includes('not supported'));
+}
+
+/** Strip all image_url content from request body, return new body Buffer or null if no images found */
+function stripImageContent(body, config) {
+  let parsed;
+  try {
+    parsed = JSON.parse(body.toString('utf-8'));
+  } catch {
+    return null;
+  }
+
+  let stripped = false;
+
+  // Fix content format issues in all messages
+  if (parsed.messages && Array.isArray(parsed.messages)) {
+    for (const msg of parsed.messages) {
+      // Case 1: msg itself is a tool_result (top-level)
+      if (msg.type === 'tool_result' && msg.content && typeof msg.content === 'string') {
+        msg.content = [{ type: 'text', text: msg.content }];
+        stripped = true;
+      }
+
+      // Case 2: msg.content is an array containing tool_result or image_url
+      if (msg.content && Array.isArray(msg.content)) {
+        const originalLen = msg.content.length;
+
+        // Fix tool_result with string content inside content array
+        for (const item of msg.content) {
+          if (item.type === 'tool_result' && item.content && typeof item.content === 'string') {
+            item.content = [{ type: 'text', text: item.content }];
+            stripped = true;
+          }
+        }
+
+        // Strip image_url
+        msg.content = msg.content.filter(c => c.type !== 'image_url');
+        if (msg.content.length < originalLen) stripped = true;
+        if (msg.content.length === 0) {
+          msg.content = [{ type: 'text', text: '' }];
+        }
+      }
+    }
+  }
+
+  if (!stripped) return null;
+
+  // Debug logging (only when logDebug is true in config)
+  const fixedBody = JSON.stringify(parsed);
+  if (config.logDebug && fixedBody.includes('image_url')) {
+    const idx = fixedBody.indexOf('image_url');
+    log('info', `  DEBUG image_url still found at position ${idx}: ${fixedBody.slice(idx - 50, idx + 100)}`);
+  }
+
+  return Buffer.from(fixedBody, 'utf-8');
 }
 
 /** Retry the request with a different target (provider + model) */

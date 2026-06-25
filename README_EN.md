@@ -331,6 +331,7 @@ Full config options:
 | `[].openai-models` | _(optional)_ | OpenAI-format model list. If set, used for OpenAI requests; if missing, `models` is used for both formats; empty list `[]` means no OpenAI support for this provider |
 | `limiter-recovery-seconds` | `300` | Cooldown recovery time (seconds) |
 | `p0-reset-interval-seconds` | `600` | Interval to reset P0 targets to queue front (seconds) |
+| `textOnlyModels` | `["deepseek-v4-pro","deepseek-v4-flash","deepseek-v3.2"]` | Text-only models. Proxy auto-strips multimodal content (images, documents, base64) before forwarding to these models |
 | `port` | `9982` | Proxy listen port |
 | `bind` | `0.0.0.0` | Listen address (all interfaces) |
 | `maxRetries` | `20` | Max rotation attempts per request |
