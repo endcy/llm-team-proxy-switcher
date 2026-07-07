@@ -2,7 +2,7 @@
 
 [English](README_EN.md) | **中文**
 
-## 📌 这是什么？
+## 📌 项目简介
 
 **llm-team-proxy-switcher** 是一个部署在团队内网的轻量级 LLM API 代理，解决 AI 编程工具（Claude Code、Codex 等）在使用第三方 API 时频繁遇到限流报错的问题。
 

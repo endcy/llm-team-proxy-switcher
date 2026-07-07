@@ -2,7 +2,7 @@
 
 [中文](README.md) | **English**
 
-## 📌 What Is This?
+## 📌 Overview
 
 **llm-team-proxy-switcher** is a lightweight LLM API proxy deployed on your team's internal network. It solves the frequent rate-limiting errors that AI coding tools (Claude Code, Codex, etc.) encounter when using third-party APIs.
 

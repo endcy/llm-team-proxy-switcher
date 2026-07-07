@@ -99,6 +99,12 @@ function loadConfig() {
       log('warn', `Failed to parse config.json: ${err.message}`);
     }
   }
+  // Trim api-key values to prevent \r or whitespace leaking into log / headers
+  if (fileCfg.providers && Array.isArray(fileCfg.providers)) {
+    for (const p of fileCfg.providers) {
+      if (typeof p['api-key'] === 'string') p['api-key'] = p['api-key'].trim();
+    }
+  }
   return { ...DEFAULTS, ...fileCfg };
 }
 
@@ -312,6 +318,8 @@ function getCoolingTargets(config) {
 
 function log(type, msg) {
   const ts = new Date().toLocaleTimeString();
+  // Strip \r and control chars to prevent log line corruption in terminal and file
+  const cleanMsg = String(msg).replace(/\r/g, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
   const prefix = {
     'info':         `${C.blue}ℹ${C.reset}`,
     'ok':           `${C.green}✓${C.reset}`,
@@ -323,13 +331,13 @@ function log(type, msg) {
     'request':      `${C.gray}→${C.reset}`,
     'response':     `${C.gray}←${C.reset}`,
   }[type] || '?';
-  console.log(`  ${C.gray}${ts}${C.reset} ${prefix} ${msg}`);
-  logToFile(type, msg);
+  console.log(`  ${C.gray}${ts}${C.reset} ${prefix} ${cleanMsg}`);
+  logToFile(type, cleanMsg);
 }
 
-/** Strip ANSI color codes for plain text log */
+/** Strip ANSI color codes and control characters (e.g. \r) for plain text log */
 function stripAnsi(text) {
-  return text.replace(/\x1b\[[0-9;]*m/g, '');
+  return text.replace(/\x1b\[[0-9;]*m/g, '').replace(/\r/g, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
 }
 
 /** Write log to file with rotation (max 200MB, archive with timestamp) */
@@ -694,6 +702,12 @@ const server = http.createServer((req, res) => {
   req.on('data', (c) => chunks.push(c));
   req.on('end', () => {
     const body = Buffer.concat(chunks);
+
+    // ── Handle count_tokens locally (most upstreams don't support this endpoint) ──
+    if (pathname === '/v1/messages/count_tokens') {
+      return handleCountTokens(req, res, body);
+    }
+
     handleProxyRequest(req, res, body, 0);
   });
   req.on('error', (err) => {
@@ -704,6 +718,58 @@ const server = http.createServer((req, res) => {
     }
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════
+//  COUNT TOKENS (local handler — most upstreams don't support this)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Handle POST /v1/messages/count_tokens locally.
+ * Returns an approximate token count based on the request body,
+ * since most upstream providers don't support this endpoint.
+ */
+function handleCountTokens(req, res, body) {
+  let parsed;
+  try {
+    parsed = JSON.parse(body.toString('utf-8'));
+  } catch {
+    return sendJSON(res, 400, { type: 'invalid_request_error', message: 'Invalid JSON body' });
+  }
+
+  const config = loadConfig();
+  const format = detectFormat(req.url);
+  const target = resolveTarget(config, format);
+
+  // Estimate token count: ~4 chars per token (rough approximation)
+  let charCount = 0;
+  if (parsed.messages && Array.isArray(parsed.messages)) {
+    for (const msg of parsed.messages) {
+      if (typeof msg.content === 'string') {
+        charCount += msg.content.length;
+      } else if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === 'text' && block.text) charCount += block.text.length;
+        }
+      }
+      if (msg.role) charCount += 4; // role overhead
+    }
+  }
+  if (typeof parsed.system === 'string') {
+    charCount += parsed.system.length;
+  } else if (Array.isArray(parsed.system)) {
+    for (const block of parsed.system) {
+      if (typeof block === 'string') charCount += block.length;
+      else if (block.text) charCount += block.text.length;
+    }
+  }
+
+  const inputTokens = Math.max(1, Math.ceil(charCount / 4));
+
+  log('request', `count_tokens → ${inputTokens} tokens (estimated)`);
+  sendJSON(res, 200, {
+    input_tokens: inputTokens,
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════════
 //  PROXY LOGIC
