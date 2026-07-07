@@ -19,17 +19,18 @@ const fs = require('fs');
 const path = require('path');
 const { URL } = require('url');
 
-// ─── Console colors ──────────────────────────────────────────────
+// ─── Console colors (disabled when stdout is not a terminal) ─────
+const isTTY = process.stdout.isTTY === true;
 const C = {
-  reset: '\x1b[0m',
-  bold: '\x1b[1m',
-  dim: '\x1b[2m',
-  red: '\x1b[31m',
-  green: '\x1b[32m',
-  yellow: '\x1b[33m',
-  blue: '\x1b[34m',
-  cyan: '\x1b[36m',
-  gray: '\x1b[90m',
+  reset: isTTY ? '\x1b[0m' : '',
+  bold:  isTTY ? '\x1b[1m' : '',
+  dim:   isTTY ? '\x1b[2m' : '',
+  red:   isTTY ? '\x1b[31m' : '',
+  green: isTTY ? '\x1b[32m' : '',
+  yellow:isTTY ? '\x1b[33m' : '',
+  blue:  isTTY ? '\x1b[34m' : '',
+  cyan:  isTTY ? '\x1b[36m' : '',
+  gray:  isTTY ? '\x1b[90m' : '',
 };
 
 // ─── Paths ───────────────────────────────────────────────────────
@@ -99,10 +100,14 @@ function loadConfig() {
       log('warn', `Failed to parse config.json: ${err.message}`);
     }
   }
-  // Trim api-key values to prevent \r or whitespace leaking into log / headers
+  // Trim all provider string fields to prevent \r or whitespace leaking into log / headers
   if (fileCfg.providers && Array.isArray(fileCfg.providers)) {
     for (const p of fileCfg.providers) {
       if (typeof p['api-key'] === 'string') p['api-key'] = p['api-key'].trim();
+      if (typeof p['base-url'] === 'string') p['base-url'] = p['base-url'].trim();
+      if (typeof p['openai-base-url'] === 'string') p['openai-base-url'] = p['openai-base-url'].trim();
+      if (Array.isArray(p.models)) p.models = p.models.map(m => typeof m === 'string' ? m.trim() : m);
+      if (Array.isArray(p['openai-models'])) p['openai-models'] = p['openai-models'].map(m => typeof m === 'string' ? m.trim() : m);
     }
   }
   return { ...DEFAULTS, ...fileCfg };
@@ -372,7 +377,9 @@ function logToFile(type, msg) {
       + String(now.getMinutes()).padStart(2, '0') + ':'
       + String(now.getSeconds()).padStart(2, '0');
     const plain = stripAnsi(msg);
-    const line = `[${ts}] [${type}] ${plain}\n`;
+    // Final safety: ensure the written line has no \r, \n, or control chars
+    const safePlain = plain.replace(/[\r\n]/g, ' ').replace(/[\x00-\x1f]/g, '');
+    const line = `[${ts}] [${type}] ${safePlain}\n`;
     fs.appendFileSync(LOG_FILE, line, 'utf-8');
   } catch {
     // Never let logging errors crash the proxy
@@ -676,9 +683,29 @@ const server = http.createServer((req, res) => {
           if (!p['api-key']) return sendJSON(res, 400, { error: `Provider P${i}: missing "api-key"` });
         }
 
+        // Merge: if an api-key looks masked (contains ***), preserve the original
+        // from the current config so reordering / editing doesn't destroy keys.
+        // Match by base-url (not index) so reordering providers is safe.
+        try {
+          const currentCfg = JSON.parse(stripJsonComments(fs.readFileSync(CONFIG_PATH, 'utf-8')));
+          const currentProviders = currentCfg.providers || [];
+          for (const p of parsed.providers) {
+            if (typeof p['api-key'] === 'string' && p['api-key'].includes('***')) {
+              const matched = currentProviders.find(
+                cp => cp['base-url'] === p['base-url']
+              );
+              if (matched) {
+                p['api-key'] = matched['api-key'];
+              }
+            }
+          }
+        } catch {
+          // If current config can't be read, just save as-is
+        }
+
         // Write config
         fs.writeFileSync(CONFIG_PATH, JSON.stringify(parsed, null, 2) + '\n', 'utf-8');
-      log('ok', 'Config updated via Web UI (llm-team-proxy-switcher)');
+        log('ok', 'Config updated via Web UI (llm-team-proxy-switcher)');
         return sendJSON(res, 200, { status: 'ok', message: 'Config saved' });
       } catch (err) {
         if (err instanceof SyntaxError) {

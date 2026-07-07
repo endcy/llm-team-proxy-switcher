@@ -199,11 +199,20 @@ function maskApiKeys(obj) {
   return obj;
 }
 
-/** Restore masked keys from savedConfig when parsing textarea JSON */
+/** Restore masked keys from savedConfig when parsing textarea JSON.
+ *  Matches providers by base-url (not array index) so reordering is safe. */
 function restoreApiKeys(textareaObj, fullObj) {
   if (!fullObj || !textareaObj) return textareaObj;
-  if (Array.isArray(textareaObj)) {
-    return textareaObj.map((v, i) => restoreApiKeys(v, fullObj[i]));
+  if (Array.isArray(textareaObj) && Array.isArray(fullObj)) {
+    return textareaObj.map(item => {
+      if (item && typeof item === 'object' && item['base-url']) {
+        const match = fullObj.find(
+          fi => fi && typeof fi === 'object' && fi['base-url'] === item['base-url']
+        );
+        return restoreApiKeys(item, match || {});
+      }
+      return item;
+    });
   }
   if (textareaObj && typeof textareaObj === 'object') {
     const out = {};
