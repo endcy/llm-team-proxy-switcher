@@ -168,8 +168,8 @@ function buildTargets(config, format) {
 
 // ─── Rotation state ──────────────────────────────────────────────
 const state = {
-  /** Per-format dynamic queues: { anthropic: [keys], openai: [keys] } */
-  targetQueues: { anthropic: [], openai: [] },
+  /** Per-format dynamic queues: { anthropic: [keys], openai: [keys], responses: [keys] } */
+  targetQueues: { anthropic: [], openai: [], responses: [] },
   /** Map<targetKey, cooldownExpiry timestamp> — brief cooldown after error */
   cooldowns: new Map(),
   /** Timer for periodic P0 reset */
@@ -192,17 +192,19 @@ function configHash(config) {
 function ensureTargetQueue(config) {
   const hash = configHash(config);
   if (state.lastConfigHash === hash &&
-      (state.targetQueues.anthropic.length > 0 || state.targetQueues.openai.length > 0)) {
+      (state.targetQueues.anthropic.length > 0 || state.targetQueues.openai.length > 0 || state.targetQueues.responses.length > 0)) {
     return;
   }
   state.targetQueues.anthropic = buildTargets(config, 'anthropic').map(t => t.key);
   state.targetQueues.openai = buildTargets(config, 'openai').map(t => t.key);
+  // Responses API uses the same targets as openai (same models, different endpoint)
+  state.targetQueues.responses = buildTargets(config, 'openai').map(t => t.key);
   state.lastConfigHash = hash;
 }
 
 /** Move a target to the end of all queues (after error) */
 function moveTargetToEnd(targetKey) {
-  for (const fmt of ['anthropic', 'openai']) {
+  for (const fmt of ['anthropic', 'openai', 'responses']) {
     const q = state.targetQueues[fmt];
     const idx = q.indexOf(targetKey);
     if (idx >= 0) {
@@ -214,8 +216,8 @@ function moveTargetToEnd(targetKey) {
 
 /** Move all P0 targets to the front of all queues */
 function resetP0ToFront(config) {
-  for (const fmt of ['anthropic', 'openai']) {
-    const targets = buildTargets(config, fmt);
+  for (const fmt of ['anthropic', 'openai', 'responses']) {
+    const targets = buildTargets(config, fmt === 'responses' ? 'openai' : fmt);
     const p0Keys = targets.filter(t => t.providerIndex === 0).map(t => t.key);
     const q = state.targetQueues[fmt];
     for (const key of p0Keys) {
@@ -250,11 +252,13 @@ function targetLabel(target, config) {
  */
 function resolveTarget(config, format) {
   format = format || 'anthropic';
+  // Responses API uses the same targets as openai
+  const targetFormat = format === 'responses' ? 'openai' : format;
   ensureTargetQueue(config);
-  const targets = buildTargets(config, format);
+  const targets = buildTargets(config, targetFormat);
   if (targets.length === 0) return null;
 
-  const queue = state.targetQueues[format] || [];
+  const queue = state.targetQueues[format] || state.targetQueues[targetFormat] || [];
   const now = Date.now();
 
   // Expire old cooldowns
@@ -287,6 +291,8 @@ function resolveTarget(config, format) {
 /** Detect request format from URL path */
 function detectFormat(reqUrl) {
   if (reqUrl.includes('/chat/completions')) return 'openai';
+  // OpenAI Responses API (used by Codex with wire_api = "responses")
+  if (reqUrl.includes('/responses')) return 'responses';
   return 'anthropic';
 }
 
@@ -484,13 +490,22 @@ function getCliSetupData(proxyUrl, defaultModel) {
       name: 'Codex (OpenAI)',
       status: 'supported',
       icon: '🟢',
-      env: {
-        OPENAI_BASE_URL: proxyUrl + '/v1',
-        OPENAI_API_KEY: 'dummy',
-        OPENAI_MODEL: defaultModel,
-      },
-      configFile: '~/.codex/config.toml or env vars',
-      notes: 'Uses OpenAI-compatible format. API_KEY must be non-empty.',
+      env: {},
+      configFile: '~/.codex/config.toml',
+      config: `# ~/.codex/config.toml
+model_provider = "Proxy"
+model = "${defaultModel}"
+
+[model_providers.Proxy]
+name = "Proxy"
+base_url = "${proxyUrl}"
+env_key = "TMP"
+wire_api = "responses"
+
+# env_key 指定环境变量名（任意已存在的环境变量均可）
+# wire_api 必须为 "responses"（Codex 0.130+ 默认）
+# base_url 指向代理地址（不要加 /v1）`,
+      notes: 'Codex 0.130+ 使用 Responses API。代理自动转换为 Chat Completions 格式，兼容所有 upstream。env_key 需指定一个已存在的环境变量名（值随意）。',
     },
     'cursor': {
       name: 'Cursor',
@@ -627,8 +642,27 @@ const server = http.createServer((req, res) => {
       });
     }
 
+    // OpenAI Responses API model listing (for Codex with wire_api = "responses")
+    if (pathname === '/responses/models' || pathname === '/responses/models/' ||
+        pathname === '/v1/responses/models' || pathname === '/v1/responses/models/') {
+      const config = loadConfig();
+      const allModels = new Set();
+      for (const p of config.providers) {
+        for (const m of (p.models || [])) allModels.add(m);
+      }
+      return sendJSON(res, 200, {
+        object: 'list',
+        data: [...allModels].map(id => ({
+          id,
+          object: 'model',
+          created: Math.floor(Date.now() / 1000),
+          owned_by: 'proxy',
+        })),
+      });
+    }
+
     // Catch-all for other API GET requests — return OK to pass validation
-    if (pathname.startsWith('/v1/')) {
+    if (pathname.startsWith('/v1/') || pathname.startsWith('/responses')) {
       return sendJSON(res, 200, { status: 'ok' });
     }
 
@@ -799,6 +833,270 @@ function handleCountTokens(req, res, body) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+//  RESPONSES API ↔ CHAT COMPLETIONS CONVERSION
+//  For Codex CLI compatibility with providers that only support Chat API
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Convert OpenAI Responses API request to Chat Completions request
+ */
+function responsesToChatRequest(body) {
+  const result = {};
+  result.model = body.model;
+
+  const messages = [];
+
+  // instructions → system message
+  if (body.instructions != null && body.instructions !== '') {
+    messages.push({ role: 'system', content: body.instructions });
+  }
+
+  // input → messages
+  if (body.input != null) {
+    if (typeof body.input === 'string') {
+      messages.push({ role: 'user', content: body.input });
+    } else if (Array.isArray(body.input)) {
+      for (const item of body.input) {
+        // Normalize: if no type field, treat as message
+        const type = item.type || 'message';
+
+        if (type === 'message') {
+          const content = extractResponsesMessageContent(item);
+          // Map developer role to system for better compatibility
+          const role = (item.role === 'developer') ? 'system' : (item.role || 'user');
+          messages.push({ role, content });
+        } else if (type === 'input_text') {
+          messages.push({ role: 'user', content: item.text || '' });
+        } else if (type === 'function_call') {
+          // Collect function calls - will be converted to assistant message with tool_calls
+          const existing = messages.find(m => m.role === 'assistant' && m.tool_calls);
+          const toolCall = {
+            id: item.call_id || item.id || '',
+            type: 'function',
+            function: {
+              name: item.name || '',
+              arguments: item.arguments || '{}'
+            }
+          };
+          if (existing) {
+            existing.tool_calls.push(toolCall);
+          } else {
+            messages.push({ role: 'assistant', content: null, tool_calls: [toolCall] });
+          }
+        } else if (type === 'function_call_output') {
+          messages.push({
+            role: 'tool',
+            tool_call_id: item.call_id || '',
+            content: item.output || ''
+          });
+        }
+        // reasoning, input_image, etc. → skip
+      }
+    }
+  }
+
+  result.messages = messages;
+
+  // max_output_tokens → max_completion_tokens
+  if (body.max_output_tokens != null) {
+    result.max_completion_tokens = body.max_output_tokens;
+  }
+
+  // Pass-through fields
+  if (body.temperature != null) result.temperature = body.temperature;
+  if (body.top_p != null) result.top_p = body.top_p;
+  if (body.stream != null) result.stream = body.stream;
+
+  // tools conversion
+  if (body.tools) {
+    const chatTools = [];
+    for (const t of body.tools) {
+      if (t.type === 'function') {
+        const fn = { name: t.name };
+        if (t.description != null) fn.description = t.description;
+        if (t.parameters != null) fn.parameters = t.parameters;
+        chatTools.push({ type: 'function', function: fn });
+      }
+    }
+    if (chatTools.length > 0) {
+      result.tools = chatTools;
+    }
+  }
+
+  if (body.tool_choice != null) result.tool_choice = body.tool_choice;
+  if (body.parallel_tool_calls != null) result.parallel_tool_calls = body.parallel_tool_calls;
+
+  // text.format → response_format
+  if (body.text?.format != null) {
+    const format = body.text.format;
+    if (format.type === 'json_schema') {
+      result.response_format = {
+        type: 'json_schema',
+        json_schema: {
+          name: format.name || 'response_schema',
+          schema: format.schema || {},
+          strict: format.strict || false
+        }
+      };
+    } else {
+      result.response_format = format;
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Extract text content from a Responses API message
+ */
+function extractResponsesMessageContent(item) {
+  const content = item.content;
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter(p => p.type === 'input_text' && p.text != null)
+      .map(p => p.text)
+      .join('');
+  }
+  return '';
+}
+
+/**
+ * Convert Chat Completions response to Responses API response
+ */
+function chatResponseToResponses(chatResponse, requestBody) {
+  const result = {
+    id: 'resp_' + (chatResponse.id || 'unknown'),
+    object: 'response',
+    created_at: chatResponse.created || Math.floor(Date.now() / 1000),
+    model: chatResponse.model || requestBody.model,
+    output: [],
+    status: 'completed'
+  };
+
+  // Convert usage
+  if (chatResponse.usage) {
+    result.usage = {
+      input_tokens: chatResponse.usage.prompt_tokens || 0,
+      output_tokens: chatResponse.usage.completion_tokens || 0,
+      total_tokens: chatResponse.usage.total_tokens || 0
+    };
+  }
+
+  // Convert choices to output items
+  if (chatResponse.choices && chatResponse.choices.length > 0) {
+    const choice = chatResponse.choices[0];
+    const message = choice.message || {};
+
+    // Text content → output_text
+    if (message.content != null && message.content !== '') {
+      result.output.push({
+        type: 'message',
+        id: 'msg_' + (chatResponse.id || 'unknown'),
+        role: 'assistant',
+        status: 'completed',
+        content: [
+          {
+            type: 'output_text',
+            text: message.content,
+            annotations: []
+          }
+        ]
+      });
+    }
+
+    // tool_calls → function_call
+    if (message.tool_calls) {
+      for (const tc of message.tool_calls) {
+        result.output.push({
+          type: 'function_call',
+          id: tc.id || '',
+          call_id: tc.id || '',
+          name: tc.function?.name || '',
+          arguments: tc.function?.arguments || '{}'
+        });
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Convert Chat Completions streaming chunk to Responses API streaming events
+ */
+function chatStreamChunkToResponses(chunk, requestId) {
+  const events = [];
+  const ts = Math.floor(Date.now() / 1000);
+
+  if (!chunk.choices || chunk.choices.length === 0) {
+    // Usage-only chunk or done
+    if (chunk.usage) {
+      events.push({ type: 'response.completed', response: { id: requestId, usage: chunk.usage } });
+    }
+    return events;
+  }
+
+  const choice = chunk.choices[0];
+  const delta = choice.delta || {};
+
+  // Response created event (first chunk)
+  if (chunk.choices[0].index === 0 && !chunk._sentCreated) {
+    events.push({
+      type: 'response.created',
+      response: { id: requestId, object: 'response', created_at: ts, model: chunk.model, output: [], status: 'in_progress' }
+    });
+    events.push({
+      type: 'response.in_progress',
+      response: { id: requestId, object: 'response', created_at: ts, model: chunk.model, output: [], status: 'in_progress' }
+    });
+    chunk._sentCreated = true;
+  }
+
+  // Content delta
+  if (delta.content != null && delta.content !== '') {
+    events.push({
+      type: 'response.output_text.delta',
+      delta: delta.content,
+      item_id: 'msg_' + requestId,
+      output_index: 0,
+      content_index: 0
+    });
+  }
+
+  // Tool call arguments delta
+  if (delta.tool_calls && delta.tool_calls.length > 0) {
+    for (const tc of delta.tool_calls) {
+      if (tc.function?.arguments) {
+        events.push({
+          type: 'response.function_call_arguments.delta',
+          delta: tc.function.arguments,
+          item_id: tc.id || '',
+          output_index: 0
+        });
+      }
+    }
+  }
+
+  // Finish reason
+  if (choice.finish_reason != null) {
+    events.push({
+      type: 'response.output_text.done',
+      item_id: 'msg_' + requestId,
+      output_index: 0,
+      content_index: 0
+    });
+    events.push({
+      type: 'response.completed',
+      response: { id: requestId, object: 'response', created_at: ts, model: chunk.model, output: [], status: 'completed' }
+    });
+  }
+
+  return events;
+}
+
+// ═══════════════════════════════════════════════════════════════════
 //  PROXY LOGIC
 // ═══════════════════════════════════════════════════════════════════
 
@@ -818,6 +1116,7 @@ function handleProxyRequest(clientReq, clientRes, body, attempt) {
 
   // Detect request format and resolve target accordingly
   const format = detectFormat(clientReq.url);
+  const isResponsesApi = format === 'responses';
   const target = resolveTarget(config, format);
   if (!target) {
     log('error', `No providers configured for ${format} format in config.json`);
@@ -841,24 +1140,40 @@ function handleProxyRequest(clientReq, clientRes, body, attempt) {
   delete parsed['output_config'];
   delete parsed['context_management'];
 
-  // Text-only models cannot handle image/document/base64 content; sanitize before forwarding.
-  if (isTextOnlyModel(target.model)) {
-    sanitizeTextOnlyRequest(parsed, config);
+  // Responses API → Chat Completions conversion
+  // Convert request body and modify URL to /v1/chat/completions
+  let convertedBody = null;
+  let modifiedUrl = clientReq.url;
+  if (isResponsesApi) {
+    convertedBody = responsesToChatRequest(parsed);
+    // Change URL from /responses or /v1/responses to /v1/chat/completions
+    modifiedUrl = '/v1/chat/completions';
+    log('info', `  Responses API → Chat Completions conversion enabled`);
   }
 
-  const newBody = Buffer.from(JSON.stringify(parsed), 'utf-8');
-  proxyToUpstream(clientReq, clientRes, newBody, originalModel, target, config, attempt);
+  // Text-only models cannot handle image/document/base64 content; sanitize before forwarding.
+  if (isTextOnlyModel(target.model)) {
+    const bodyToSanitize = convertedBody || parsed;
+    sanitizeTextOnlyRequest(bodyToSanitize, config);
+    if (convertedBody) convertedBody = bodyToSanitize;
+  }
+
+  const newBody = Buffer.from(JSON.stringify(convertedBody || parsed), 'utf-8');
+  proxyToUpstream(clientReq, clientRes, newBody, originalModel, target, config, attempt, isResponsesApi, modifiedUrl);
 }
 
-function proxyToUpstream(clientReq, clientRes, body, originalModel, target, config, attempt) {
+function proxyToUpstream(clientReq, clientRes, body, originalModel, target, config, attempt, isResponsesApi, modifiedUrl) {
   // Properly join base-url path with request path
   // baseUrl may have a path (e.g. https://opencode.ai/zen/go)
-  // clientReq.url starts with / (e.g. /v1/messages?beta=true)
+  // For Responses API, modifiedUrl is /v1/chat/completions (already converted)
   const base = target.baseUrl.replace(/\/+$/, '');          // strip trailing slash
-  let reqPath = clientReq.url;                             // e.g. /v1/messages?beta=true
-  // Normalize: if path doesn't start with /v1/, prepend /v1
-  if (!reqPath.startsWith('/v1/') && !reqPath.startsWith('/v1?')) {
-    reqPath = '/v1' + reqPath;
+  let reqPath = modifiedUrl || clientReq.url;               // use modified URL for Responses API
+
+  // Normalize path based on endpoint type (skip for already-converted Responses API)
+  if (!isResponsesApi) {
+    if (!reqPath.startsWith('/v1/') && !reqPath.startsWith('/v1?')) {
+      reqPath = '/v1' + reqPath;
+    }
   }
 
   // Choose base URL based on request format
@@ -899,6 +1214,9 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
     timeout: config.requestTimeoutMs,
   };
 
+  // Generate a response ID for Responses API conversion
+  const responseId = 'resp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
   const upstreamReq = transport.request(options, (upstreamRes) => {
     const statusCode = upstreamRes.statusCode;
     const contentType = upstreamRes.headers['content-type'] || '';
@@ -919,7 +1237,7 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
           if (next && next.key !== target.key) {
             log('retry', `Retrying with ${targetLabel(next, config)}...`);
             log('info', `  Now: ${targetDetails(next)}`);
-            retryWithTarget(clientReq, clientRes, body, originalModel, next, config, attempt);
+            retryWithTarget(clientReq, clientRes, body, originalModel, next, config, attempt, isResponsesApi, modifiedUrl);
             return;
           }
         }
@@ -929,21 +1247,37 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
           const strippedBody = stripImageContent(body, config);
           if (strippedBody) {
             log('retry', `Retrying with fixed content format...`);
-            proxyToUpstream(clientReq, clientRes, strippedBody, originalModel, target, config, attempt + 1);
+            proxyToUpstream(clientReq, clientRes, strippedBody, originalModel, target, config, attempt + 1, isResponsesApi, modifiedUrl);
             return;
           }
         }
 
+        // Convert response back to Responses API format if needed
+        let finalBody = resBody;
+        let finalStatusCode = statusCode;
+        if (isResponsesApi && statusCode >= 200 && statusCode < 300) {
+          try {
+            const chatResponse = JSON.parse(resBody.toString('utf-8'));
+            const responsesResponse = chatResponseToResponses(chatResponse, JSON.parse(body.toString('utf-8')));
+            finalBody = Buffer.from(JSON.stringify(responsesResponse), 'utf-8');
+            log('info', `  Converted Chat Completions response → Responses API format`);
+          } catch (e) {
+            log('warn', `  Failed to convert response: ${e.message}`);
+          }
+        }
+
         // Forward response to client
-        clientRes.writeHead(statusCode, upstreamRes.headers);
-        clientRes.end(resBody);
-        log('response', `${statusCode} ${targetLabel(target, config)} (${resBody.length}B)`);
+        const responseHeaders = { ...upstreamRes.headers };
+        responseHeaders['content-length'] = String(finalBody.length);
+        clientRes.writeHead(finalStatusCode, responseHeaders);
+        clientRes.end(finalBody);
+        log('response', `${finalStatusCode} ${targetLabel(target, config)} (${finalBody.length}B)`);
       });
       return;
     }
 
     // ── Streaming: SSE handling ──
-    handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalModel, target, config, attempt);
+    handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalModel, target, config, attempt, isResponsesApi, modifiedUrl, responseId);
   });
 
   // Connection error
@@ -986,7 +1320,7 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
  * If 429 is received before streaming starts, retry with next target.
  * If 400 with image_url error, strip images and retry.
  */
-function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalModel, target, config, attempt) {
+function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalModel, target, config, attempt, isResponsesApi, modifiedUrl, responseId) {
   // 429 before stream starts — retry
   if (SWITCH_STATUS_CODES.has(upstreamRes.statusCode) && attempt < config.maxRetries) {
     const chunks = [];
@@ -999,7 +1333,7 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
       if (next && next.key !== target.key) {
         log('retry', `Stream got 429, retrying with ${targetLabel(next, config)}...`);
         log('info', `  Now: ${targetDetails(next)}`);
-        retryWithTarget(clientReq, clientRes, body, originalModel, next, config, attempt);
+        retryWithTarget(clientReq, clientRes, body, originalModel, next, config, attempt, isResponsesApi, modifiedUrl);
         return;
       }
       clientRes.writeHead(429, upstreamRes.headers);
@@ -1018,7 +1352,7 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
         const strippedBody = stripImageContent(body);
         if (strippedBody) {
           log('retry', `Stream got content error, retrying with fixed format...`);
-          proxyToUpstream(clientReq, clientRes, strippedBody, originalModel, target, config, attempt + 1);
+          proxyToUpstream(clientReq, clientRes, strippedBody, originalModel, target, config, attempt + 1, isResponsesApi, modifiedUrl);
           return;
         }
       }
@@ -1038,12 +1372,230 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
   };
   clientRes.writeHead(upstreamRes.statusCode, streamHeaders);
 
+  // For Responses API streaming conversion
+  let sseBuffer = '';
+  const reqId = responseId || generateId('resp_', 12);
+  const streamState = {
+    sentCreated: false,
+    itemId: generateId('msg_', 12),
+    model: null,
+    createdAt: Math.floor(Date.now() / 1000),
+    sequenceNumber: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    textBuffer: '',
+    collectedOutput: [],
+    hasMessageItemStarted: false,
+    hasContentPartStarted: false,
+    outputIndex: 0,
+    contentIndex: 0,
+    pendingCompletion: false
+  };
+
+  function nextSeq() {
+    return streamState.sequenceNumber++;
+  }
+
   // Stream data through
   upstreamRes.on('data', (chunk) => {
-    clientRes.write(chunk);
+    if (!isResponsesApi) {
+      // Pass through as-is for non-Responses API
+      clientRes.write(chunk);
+      return;
+    }
+
+    // Convert Chat Completions SSE to Responses API SSE
+    const chunkStr = chunk.toString('utf-8');
+    sseBuffer += chunkStr;
+
+    // Process complete SSE lines
+    const lines = sseBuffer.split('\n');
+    sseBuffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith(':')) continue; // Skip empty lines and comments
+
+      if (trimmed.startsWith('data: ')) {
+        const data = trimmed.slice(6);
+        if (data === '[DONE]') {
+          // Handle [DONE] - emit completion if pending
+          if (streamState.pendingCompletion) {
+            emitCompleted(clientRes, reqId, streamState);
+          }
+          clientRes.write('data: [DONE]\n\n');
+          continue;
+        }
+
+        try {
+          const chatChunk = JSON.parse(data);
+
+          // Extract usage when present
+          if (chatChunk.usage) {
+            streamState.inputTokens = chatChunk.usage.prompt_tokens || streamState.inputTokens;
+            streamState.outputTokens = chatChunk.usage.completion_tokens || streamState.outputTokens;
+
+            // Usage-only chunk (no choices) - may trigger completion
+            if (!chatChunk.choices || chatChunk.choices.length === 0) {
+              if (streamState.pendingCompletion) {
+                emitCompleted(clientRes, reqId, streamState);
+              }
+              continue;
+            }
+          }
+
+          const choice = chatChunk.choices?.[0];
+          if (!choice) continue;
+
+          const delta = choice.delta || {};
+
+          // First chunk with role → emit response.created + response.in_progress
+          if (delta.role === 'assistant' && !streamState.sentCreated) {
+            streamState.model = chatChunk.model || streamState.model;
+            ensureResponseCreated(clientRes, reqId, streamState, nextSeq);
+          }
+
+          // Handle text content
+          if (delta.content != null && delta.content !== '') {
+            if (!streamState.sentCreated) {
+              streamState.model = chatChunk.model || streamState.model;
+              ensureResponseCreated(clientRes, reqId, streamState, nextSeq);
+            }
+
+            // Start message item if not started
+            if (!streamState.hasMessageItemStarted) {
+              streamState.hasMessageItemStarted = true;
+              streamState.textBuffer = '';
+              streamState.contentIndex = 0;
+              sendResponsesEvent(clientRes, 'response.output_item.added', {
+                type: 'response.output_item.added',
+                output_index: streamState.outputIndex,
+                item: {
+                  type: 'message',
+                  id: streamState.itemId,
+                  role: 'assistant',
+                  content: [],
+                  status: 'in_progress'
+                },
+                sequence_number: nextSeq()
+              });
+            }
+
+            // Start content part if not started
+            if (!streamState.hasContentPartStarted) {
+              streamState.hasContentPartStarted = true;
+              sendResponsesEvent(clientRes, 'response.content_part.added', {
+                type: 'response.content_part.added',
+                output_index: streamState.outputIndex,
+                content_index: streamState.contentIndex,
+                item_id: streamState.itemId,
+                part: { type: 'output_text', text: '', annotations: [] },
+                sequence_number: nextSeq()
+              });
+            }
+
+            // Emit delta
+            sendResponsesEvent(clientRes, 'response.output_text.delta', {
+              type: 'response.output_text.delta',
+              output_index: streamState.outputIndex,
+              content_index: streamState.contentIndex,
+              item_id: streamState.itemId,
+              delta: delta.content,
+              sequence_number: nextSeq()
+            });
+            streamState.textBuffer += delta.content;
+          }
+
+          // Handle finish_reason
+          if (choice.finish_reason) {
+            // Close current message item
+            if (streamState.hasContentPartStarted) {
+              sendResponsesEvent(clientRes, 'response.output_text.done', {
+                type: 'response.output_text.done',
+                output_index: streamState.outputIndex,
+                content_index: streamState.contentIndex,
+                item_id: streamState.itemId,
+                text: streamState.textBuffer,
+                sequence_number: nextSeq()
+              });
+              sendResponsesEvent(clientRes, 'response.content_part.done', {
+                type: 'response.content_part.done',
+                output_index: streamState.outputIndex,
+                content_index: streamState.contentIndex,
+                item_id: streamState.itemId,
+                part: { type: 'output_text', text: streamState.textBuffer, annotations: [] },
+                sequence_number: nextSeq()
+              });
+              streamState.hasContentPartStarted = false;
+            }
+            if (streamState.hasMessageItemStarted) {
+              sendResponsesEvent(clientRes, 'response.output_item.done', {
+                type: 'response.output_item.done',
+                output_index: streamState.outputIndex,
+                item: {
+                  type: 'message',
+                  id: streamState.itemId,
+                  role: 'assistant',
+                  content: [{ type: 'output_text', text: streamState.textBuffer, annotations: [] }],
+                  status: 'completed'
+                },
+                sequence_number: nextSeq()
+              });
+              streamState.collectedOutput.push({
+                type: 'message',
+                id: streamState.itemId,
+                role: 'assistant',
+                content: [{ type: 'output_text', text: streamState.textBuffer, annotations: [] }]
+              });
+              streamState.hasMessageItemStarted = false;
+              streamState.outputIndex++;
+            }
+
+            streamState.pendingCompletion = true;
+            // If there's usage in this chunk, emit completed now
+            if (chatChunk.usage) {
+              emitCompleted(clientRes, reqId, streamState);
+            }
+          }
+        } catch (e) {
+          // If parsing fails, pass through original
+          clientRes.write(line + '\n');
+        }
+      }
+    }
   });
 
   upstreamRes.on('end', () => {
+    // Process any remaining buffer
+    if (isResponsesApi && sseBuffer.trim()) {
+      const trimmed = sseBuffer.trim();
+      if (trimmed.startsWith('data: ') && trimmed.slice(6) !== '[DONE]') {
+        try {
+          const chatChunk = JSON.parse(trimmed.slice(6));
+          if (chatChunk.choices?.[0]?.delta?.content) {
+            if (!streamState.sentCreated) {
+              streamState.model = chatChunk.model || streamState.model;
+              ensureResponseCreated(clientRes, reqId, streamState, nextSeq);
+            }
+            sendResponsesEvent(clientRes, 'response.output_text.delta', {
+              type: 'response.output_text.delta',
+              output_index: streamState.outputIndex,
+              content_index: streamState.contentIndex,
+              item_id: streamState.itemId,
+              delta: chatChunk.choices[0].delta.content,
+              sequence_number: nextSeq()
+            });
+            streamState.textBuffer += chatChunk.choices[0].delta.content;
+          }
+        } catch (e) {
+          clientRes.write(trimmed + '\n');
+        }
+      }
+    }
+    // Ensure completion is emitted
+    if (isResponsesApi && streamState.pendingCompletion) {
+      emitCompleted(clientRes, reqId, streamState);
+    }
     clientRes.end();
     log('response', `stream done ${targetLabel(target, config)}`);
   });
@@ -1056,6 +1608,107 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
   clientReq.on('close', () => {
     upstreamRes.destroy();
   });
+}
+
+/**
+ * Send a Responses API SSE event with proper format
+ */
+function sendResponsesEvent(clientRes, eventType, eventData) {
+  clientRes.write(`event: ${eventType}\n`);
+  clientRes.write(`data: ${JSON.stringify(eventData)}\n\n`);
+}
+
+/**
+ * Generate a random hex ID
+ */
+function generateId(prefix, bytes = 12) {
+  const chars = '0123456789abcdef';
+  let result = prefix || '';
+  for (let i = 0; i < bytes * 2; i++) {
+    result += chars[Math.floor(Math.random() * 16)];
+  }
+  return result;
+}
+
+/**
+ * Ensure response.created and response.in_progress events have been sent
+ */
+function ensureResponseCreated(clientRes, requestId, streamState, nextSeq) {
+  if (streamState.sentCreated) return;
+  streamState.sentCreated = true;
+
+  const base = {
+    id: requestId,
+    object: 'response',
+    model: streamState.model || 'unknown',
+    status: 'in_progress',
+    output: [],
+    created_at: streamState.createdAt
+  };
+
+  sendResponsesEvent(clientRes, 'response.created', {
+    type: 'response.created',
+    response: { ...base, status: 'queued' },
+    sequence_number: nextSeq()
+  });
+  sendResponsesEvent(clientRes, 'response.in_progress', {
+    type: 'response.in_progress',
+    response: base,
+    sequence_number: nextSeq()
+  });
+}
+
+/**
+ * Emit response.completed event
+ */
+function emitCompleted(clientRes, requestId, streamState) {
+  if (!streamState.pendingCompletion) return;
+  streamState.pendingCompletion = false;
+
+  const completedAt = Math.floor(Date.now() / 1000);
+  const response = {
+    id: requestId,
+    object: 'response',
+    model: streamState.model || 'unknown',
+    status: 'completed',
+    output: streamState.collectedOutput,
+    usage: {
+      input_tokens: streamState.inputTokens || 0,
+      output_tokens: streamState.outputTokens || 0,
+      total_tokens: (streamState.inputTokens || 0) + (streamState.outputTokens || 0)
+    },
+    created_at: streamState.createdAt,
+    completed_at: completedAt
+  };
+
+  sendResponsesEvent(clientRes, 'response.completed', {
+    type: 'response.completed',
+    response,
+    sequence_number: streamState.sequenceNumber++
+  });
+}
+
+/**
+ * Build a response object for Responses API events
+ */
+function buildResponseObject(requestId, streamState, status) {
+  const completedAt = Math.floor(Date.now() / 1000);
+  const output = streamState.collectedOutput || [];
+
+  return {
+    id: requestId,
+    object: 'response',
+    model: streamState.model || 'unknown',
+    status,
+    output,
+    usage: {
+      input_tokens: streamState.inputTokens || 0,
+      output_tokens: streamState.outputTokens || 0,
+      total_tokens: (streamState.inputTokens || 0) + (streamState.outputTokens || 0)
+    },
+    created_at: streamState.createdAt || completedAt,
+    completed_at: completedAt
+  };
 }
 
 /** Check if model is text-only and should not receive images/documents */
@@ -1177,7 +1830,7 @@ function stripImageContent(body, config) {
 }
 
 /** Retry the request with a different target (provider + model) */
-function retryWithTarget(clientReq, clientRes, body, originalModel, newTarget, config, attempt) {
+function retryWithTarget(clientReq, clientRes, body, originalModel, newTarget, config, attempt, isResponsesApi, modifiedUrl) {
   let parsed;
   try {
     parsed = JSON.parse(body.toString('utf-8'));
@@ -1189,7 +1842,7 @@ function retryWithTarget(clientReq, clientRes, body, originalModel, newTarget, c
   parsed.model = newTarget.model;
   const newBody = Buffer.from(JSON.stringify(parsed), 'utf-8');
 
-  proxyToUpstream(clientReq, clientRes, newBody, originalModel, newTarget, config, attempt + 1);
+  proxyToUpstream(clientReq, clientRes, newBody, originalModel, newTarget, config, attempt + 1, isResponsesApi, modifiedUrl);
 }
 
 // ═══════════════════════════════════════════════════════════════════

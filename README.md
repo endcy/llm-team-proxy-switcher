@@ -38,6 +38,7 @@
 - **自动恢复** — 冷却时间到期后自动切回首选 Provider + 首选 Model
 - **透明代理** — 不修改客户端任何配置，仅需改一个环境变量 `*_BASE_URL`
 - **多 CLI 兼容** — 支持 Claude Code、Codex、Cursor 等任何 OpenAI / Anthropic 兼容客户端
+- **Responses API 转换** — 自动将 Codex 的 Responses API 转换为 Chat Completions，兼容所有 upstream provider
 - **Web UI 管理** — 内置主页（实时状态）+ 配置编辑器（JSON 编辑 + 校验 + 保存）+ CLI 配置指南
 - **认证格式兼容** — 同时支持 `Authorization: Bearer` 和 `x-api-key`，自动检测并替换
 - **流式响应支持** — 完整支持 SSE streaming，不影响打字体验
@@ -70,7 +71,7 @@
 | 工具 | 状态 | 说明 |
 |------|------|------|
 | **Claude Code** | ✅ 已支持 | 完整支持，已验证 |
-| **Codex (OpenAI)** | ✅ 已支持 | OpenAI 兼容格式，原理相同 |
+| **Codex (OpenAI)** | ✅ 已支持 | Responses API 自动转换为 Chat Completions，兼容所有 provider |
 | **Cursor** | 🔜 计划中 | 原理相同，待验证 |
 | **OpenClaw** | ✅ 已支持 | 自动剥离 provider 前缀（如 bailian/qwen3.7-plus）|
 | **WorkBuddy** | ✅ 已支持 | OpenAI 格式，自动路由到 openai-base-url |
@@ -361,25 +362,35 @@ Content-Type: application/json
 
 #### Codex / OpenAI CLI（✅ 已支持）
 
-Codex 使用 OpenAI 兼容格式，配置方式：
+Codex CLI 0.130+ 使用 OpenAI Responses API（`/responses` 端点）。本代理**自动将 Responses API 转换为 Chat Completions API**，兼容所有只支持 Chat Completions 的 upstream provider。
 
-```bash
-# 环境变量方式
-export OPENAI_BASE_URL=http://192.168.23.145:9982/v1
-export OPENAI_API_KEY=dummy
-```
-
-或在 Codex 配置文件中：
+**配置方式：**
 
 ```toml
 # ~/.codex/config.toml
-[api]
-base_url = "http://192.168.23.145:9982/v1"
-api_key = "dummy"
+model_provider = "Proxy"
+model = "qwen3.7-plus"
+
+[model_providers.Proxy]
+name = "Proxy"
+base_url = "http://<your-proxy-ip>:9982"
+env_key = "TMP"
+wire_api = "responses"
 ```
 
-- 注意 URL 末尾需要 `/v1`（OpenAI 格式标准路径）
-- `OPENAI_API_KEY` 必须非空（代理会替换）
+**配置说明：**
+- `model_provider` / `name` — 自定义名称，保持一致即可
+- `model` — 使用 config.json 中配置的任意模型名
+- `base_url` — 代理地址（**不要加 `/v1`**，替换为实际代理 IP 和端口）
+- `env_key` — 环境变量名（任意已存在的环境变量均可，值随意）
+- `wire_api` — 必须为 `"responses"`（Codex 0.130+ 默认）
+
+**代理自动处理：**
+- ✅ 接收 Codex 的 Responses API 请求（`POST /responses`）
+- ✅ 转换为 Chat Completions 格式（`POST /v1/chat/completions`）
+- ✅ 将 `developer` 角色映射为 `system`（兼容国内 provider）
+- ✅ 将响应转换回 Responses API 格式返回给 Codex
+- ✅ 流式 SSE 格式完整转换（包含 `sequence_number`、完整事件序列）
 
 #### Cursor（🔜 待验证）
 

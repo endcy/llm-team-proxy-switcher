@@ -96,6 +96,9 @@ a:hover{color:#60a5fa}
 .cli-env{background:var(--surface);border-radius:6px;padding:.75rem;margin:.5rem 0;font-family:'SF Mono',Monaco,monospace;font-size:.8rem;line-height:1.6;overflow-x:auto;white-space:pre}
 .cli-env .k{color:var(--primary)}
 .cli-env .v{color:var(--green)}
+.cli-config{background:var(--surface);border-radius:6px;padding:.75rem;margin:.5rem 0;border:1px solid var(--border)}
+.cli-config pre{margin:0;white-space:pre-wrap;word-break:break-word}
+.cli-config code{font-family:'SF Mono',Monaco,monospace;font-size:.78rem;line-height:1.5;color:var(--text)}
 .cli-file{color:var(--muted);font-size:.8rem;margin-bottom:.4rem}
 .cli-notes{color:var(--dim);font-size:.82rem;line-height:1.5}
 
@@ -271,6 +274,9 @@ async function loadCliSetup() {
       const envLines = Object.entries(cli.env).map(([k, v]) =>
         `<span class="k">${esc(k)}</span>: <span class="v">${esc(v)}</span>`
       ).join('\n');
+      const configBlock = cli.config
+        ? `<div class="cli-config"><pre><code>${esc(cli.config)}</code></pre></div>`
+        : '';
       return `
         <div class="cli-card">
           <div class="cli-card-header">
@@ -278,6 +284,7 @@ async function loadCliSetup() {
             ${badge}
           </div>
           <div class="cli-env">${envLines}</div>
+          ${configBlock}
           <div class="cli-file">Config: ${esc(cli.configFile)}</div>
           <div class="cli-notes">${esc(cli.notes)}</div>
         </div>
