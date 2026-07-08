@@ -41,6 +41,7 @@ const LOG_DIR = path.join(PROXY_DIR, 'log');
 const LOG_FILE = path.join(LOG_DIR, 'llm-proxy.log');
 const LOG_MAX_SIZE = 200 * 1024 * 1024; // 200MB
 const SWITCH_STATUS_CODES = new Set([429, 524, 529]);
+const MAX_401_RETRIES = 5; // Switch to next key after 5 consecutive 401 errors
 
 // ─── Display URL helper ──────────────────────────────────────────
 function getLocalIP() {
@@ -172,6 +173,8 @@ const state = {
   targetQueues: { anthropic: [], openai: [], responses: [] },
   /** Map<targetKey, cooldownExpiry timestamp> — brief cooldown after error */
   cooldowns: new Map(),
+  /** Map<targetKey, 401 error count> — track consecutive 401 errors per target */
+  auth401Counts: new Map(),
   /** Timer for periodic P0 reset */
   p0ResetTimer: null,
   /** Last config providers hash — for detecting config changes */
@@ -305,6 +308,31 @@ function markTargetCooled(targetKey, config) {
   const recoverySec = config['limiter-recovery-seconds'] || 300;
   state.cooldowns.set(targetKey, Date.now() + recoverySec * 1000);
   moveTargetToEnd(targetKey);
+}
+
+/**
+ * Handle 401 Unauthorized error for a target.
+ * Increment the 401 counter. Only switch to next target after MAX_401_RETRIES consecutive 401s.
+ * Returns true if should switch to next target, false if should retry same target.
+ */
+function handle401Error(targetKey, config) {
+  const count = (state.auth401Counts.get(targetKey) || 0) + 1;
+  state.auth401Counts.set(targetKey, count);
+
+  if (count >= MAX_401_RETRIES) {
+    // Reached max retries, reset counter and switch
+    state.auth401Counts.set(targetKey, 0);
+    moveTargetToEnd(targetKey);
+    return true; // Should switch
+  }
+  return false; // Should retry same target
+}
+
+/**
+ * Reset 401 error count for a target (called on successful request)
+ */
+function reset401Count(targetKey) {
+  state.auth401Counts.delete(targetKey);
 }
 
 function getCoolingTargets(config) {
@@ -1242,6 +1270,28 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
           }
         }
 
+        // Handle 401 Unauthorized — retry same target up to MAX_401_RETRIES times, then switch
+        if (statusCode === 401 && attempt < config.maxRetries) {
+          const shouldSwitch = handle401Error(target.key, config);
+          const count401 = state.auth401Counts.get(target.key) || 0;
+          if (shouldSwitch) {
+            log('warn', `${targetLabel(target, config)} → 401 Unauthorized (${MAX_401_RETRIES} retries), switching to next key`);
+            log('info', `  Was: ${targetDetails(target)}`);
+            const next = resolveTarget(config, detectFormat(clientReq.url));
+            if (next && next.key !== target.key) {
+              log('retry', `Retrying with ${targetLabel(next, config)}...`);
+              log('info', `  Now: ${targetDetails(next)}`);
+              retryWithTarget(clientReq, clientRes, body, originalModel, next, config, attempt, isResponsesApi, modifiedUrl);
+              return;
+            }
+          } else {
+            log('warn', `${targetLabel(target, config)} → 401 Unauthorized (retry ${count401}/${MAX_401_RETRIES})`);
+            // Retry with same target
+            retryWithTarget(clientReq, clientRes, body, originalModel, target, config, attempt, isResponsesApi, modifiedUrl);
+            return;
+          }
+        }
+
         // Handle 400 error due to unsupported content format
         if (isImageUnsupportedError(statusCode, resBody) && attempt < config.maxRetries) {
           const strippedBody = stripImageContent(body, config);
@@ -1267,6 +1317,10 @@ function proxyToUpstream(clientReq, clientRes, body, originalModel, target, conf
         }
 
         // Forward response to client
+        // Reset 401 counter on success
+        if (finalStatusCode >= 200 && finalStatusCode < 300) {
+          reset401Count(target.key);
+        }
         const responseHeaders = { ...upstreamRes.headers };
         responseHeaders['content-length'] = String(finalBody.length);
         clientRes.writeHead(finalStatusCode, responseHeaders);
@@ -1337,6 +1391,35 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
         return;
       }
       clientRes.writeHead(429, upstreamRes.headers);
+      clientRes.end(Buffer.concat(chunks));
+    });
+    return;
+  }
+
+  // 401 Unauthorized before stream starts — retry same target up to MAX_401_RETRIES, then switch
+  if (upstreamRes.statusCode === 401 && attempt < config.maxRetries) {
+    const chunks = [];
+    upstreamRes.on('data', (c) => chunks.push(c));
+    upstreamRes.on('end', () => {
+      const shouldSwitch = handle401Error(target.key, config);
+      const count401 = state.auth401Counts.get(target.key) || 0;
+      if (shouldSwitch) {
+        log('warn', `${targetLabel(target, config)} → 401 Unauthorized (${MAX_401_RETRIES} retries), switching to next key (stream)`);
+        log('info', `  Was: ${targetDetails(target)}`);
+        const next = resolveTarget(config, detectFormat(clientReq.url));
+        if (next && next.key !== target.key) {
+          log('retry', `Stream got 401, retrying with ${targetLabel(next, config)}...`);
+          log('info', `  Now: ${targetDetails(next)}`);
+          retryWithTarget(clientReq, clientRes, body, originalModel, next, config, attempt, isResponsesApi, modifiedUrl);
+          return;
+        }
+      } else {
+        log('warn', `${targetLabel(target, config)} → 401 Unauthorized (retry ${count401}/${MAX_401_RETRIES}, stream)`);
+        // Retry with same target
+        retryWithTarget(clientReq, clientRes, body, originalModel, target, config, attempt, isResponsesApi, modifiedUrl);
+        return;
+      }
+      clientRes.writeHead(401, upstreamRes.headers);
       clientRes.end(Buffer.concat(chunks));
     });
     return;

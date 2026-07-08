@@ -37,6 +37,8 @@ Simply run this proxy on a team server, point all members' CLI tools to it, and 
 - **Auto Recovery** — Automatically switches back to primary Provider + Model after cooldown expires
 - **Transparent Proxy** — No client config changes needed, just one env var `*_BASE_URL`
 - **Multi-CLI Compatible** — Supports Claude Code, Codex, Cursor, and any OpenAI / Anthropic-compatible client
+- **Responses API Conversion** — Automatically converts Codex's Responses API to Chat Completions, compatible with all upstream providers
+- **401 Smart Retry** — Auto-retries 5 times on API key failure (401), then switches to next key
 - **Web UI Management** — Built-in dashboard (live status) + config editor (JSON edit + validate + save) + CLI setup guide
 - **Auth Format Compatible** — Supports both `Authorization: Bearer` and `x-api-key`, auto-detected and replaced
 - **Streaming Support** — Full SSE streaming support, no impact on typing experience
@@ -48,7 +50,7 @@ Most LLM proxy tools on the market are built for **token-based billing** scenari
 
 **This tool is built specifically for Coding Plan subscribers.** If you and your team each have a Claude Code / Codex Coding Plan subscription with independent API keys and quotas, you don't need a bloated LLM gateway. You need a **simple, lightweight, quota-pooling proxy that switches on rate limits**.
 
-That's exactly what this project does: **one JSON config + one JS file + one command** — and your whole team shares all members' Coding Plan quotas, with seamless auto-switching on 429 rate limit / 524 timeout / 529 overloadeds.
+That's exactly what this project does: **one JSON config + one JS file + one command** — and your whole team shares all members' Coding Plan quotas, with seamless auto-switching on 429 rate limit / 524 timeout / 529 overload / 401 auth failure.
 
 > 💡 **One-line advantage:** Zero dependencies, single file, deploy in seconds. No token billing, no user management — just Plan quota pooling and rate-limit switching. Solving the most painful problem with the least code.
 
@@ -68,7 +70,7 @@ How it compares to similar tools:
 | Tool | Status | Notes |
 |------|--------|-------|
 | **Claude Code** | ✅ Supported | Fully tested and verified |
-| **Codex (OpenAI)** | ✅ Supported | OpenAI-compatible format |
+| **Codex (OpenAI)** | ✅ Supported | Responses API auto-converted to Chat Completions, compatible with all providers |
 | **Cursor** | 🔜 Planned | Same principle, pending verification |
 | **OpenClaw** | ✅ Supported | Auto-strips provider prefix (e.g. bailian/qwen3.7-plus) |
 | **WorkBuddy** | ✅ Supported | OpenAI format, auto-routes to openai-base-url |
@@ -208,25 +210,35 @@ All CLI tools work the same way — point the API Base URL to the proxy, and it 
 
 ### Codex / OpenAI CLI (✅ Supported)
 
-Codex uses the OpenAI-compatible format:
+Codex CLI 0.130+ uses OpenAI Responses API (`/responses` endpoint). The proxy **automatically converts Responses API to Chat Completions API**, compatible with all upstream providers that only support Chat Completions.
 
-```bash
-# Environment variables
-export OPENAI_BASE_URL=http://192.168.23.145:9982/v1
-export OPENAI_API_KEY=dummy
-```
-
-Or in config file:
+**Configuration:**
 
 ```toml
 # ~/.codex/config.toml
-[api]
-base_url = "http://192.168.23.145:9982/v1"
-api_key = "dummy"
+model_provider = "Proxy"
+model = "qwen3.7-plus"
+
+[model_providers.Proxy]
+name = "Proxy"
+base_url = "http://<your-proxy-ip>:9982"
+env_key = "TMP"
+wire_api = "responses"
 ```
 
-- Note: URL must end with `/v1` (OpenAI format standard)
-- `OPENAI_API_KEY` must be non-empty (proxy replaces it)
+**Configuration Notes:**
+- `model_provider` / `name` — Custom name, keep them consistent
+- `model` — Use any model name configured in config.json
+- `base_url` — Proxy address (**do not add `/v1`**, replace with actual proxy IP and port)
+- `env_key` — Environment variable name (any existing environment variable works, value doesn't matter)
+- `wire_api` — Must be `"responses"` (default for Codex 0.130+)
+
+**Proxy Auto-Handles:**
+- ✅ Receives Codex's Responses API requests (`POST /responses`)
+- ✅ Converts to Chat Completions format (`POST /v1/chat/completions`)
+- ✅ Maps `developer` role to `system` (compatible with domestic providers)
+- ✅ Converts responses back to Responses API format for Codex
+- ✅ Full streaming SSE format conversion (includes `sequence_number`, complete event sequence)
 
 ### Cursor (🔜 Pending Verification)
 
@@ -512,6 +524,20 @@ Changes to `config.json` take effect immediately — no restart needed.
 
 
 ## Changelog
+
+### 2026-07-08
+
+- **Added Codex CLI Support**:
+  - Supports Codex 0.130+ Responses API (`/responses` endpoint)
+  - Automatically converts Responses API requests to Chat Completions format, compatible with all upstream providers
+  - Automatically maps `developer` role to `system` (compatible with domestic providers)
+  - Full streaming SSE format conversion (includes `sequence_number`, complete event sequence)
+  - Supports non-streaming and streaming responses, tool call (function_call) conversion
+- **Added 401 Unauthorized Smart Retry**:
+  - Automatically retries current key up to 5 times on API key failure (401)
+  - After 5 failures, automatically switches to next key
+  - Resets 401 count on successful request
+  - Unlike 429/524/529 which switch immediately, 401 has a retry buffer to avoid false switches due to temporary failures
 
 ### 2026-06-23
 
