@@ -1458,6 +1458,8 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
   // For Responses API streaming conversion
   let sseBuffer = '';
   const reqId = responseId || generateId('resp_', 12);
+  let upstreamChunkCount = 0;
+  let upstreamContentReceived = false;
   const streamState = {
     sentCreated: false,
     itemId: generateId('msg_', 12),
@@ -1470,9 +1472,14 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
     collectedOutput: [],
     hasMessageItemStarted: false,
     hasContentPartStarted: false,
+    messageOutputIndex: 0,
     outputIndex: 0,
     contentIndex: 0,
-    pendingCompletion: false
+    pendingCompletion: false,
+    completedEmitted: false,
+    // Tool call tracking for Responses API streaming
+    toolCalls: [],         // Array of { id, name, arguments, itemId, outputIndex }
+    toolCallMap: {},       // index → toolCalls array index
   };
 
   function nextSeq() {
@@ -1490,6 +1497,7 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
     // Convert Chat Completions SSE to Responses API SSE
     const chunkStr = chunk.toString('utf-8');
     sseBuffer += chunkStr;
+    upstreamChunkCount++;
 
     // Process complete SSE lines
     const lines = sseBuffer.split('\n');
@@ -1502,10 +1510,8 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
       if (trimmed.startsWith('data: ')) {
         const data = trimmed.slice(6);
         if (data === '[DONE]') {
-          // Handle [DONE] - emit completion if pending
-          if (streamState.pendingCompletion) {
-            emitCompleted(clientRes, reqId, streamState);
-          }
+          // Handle [DONE] - always try to emit completion (guard prevents duplicates)
+          emitCompleted(clientRes, reqId, streamState);
           clientRes.write('data: [DONE]\n\n');
           continue;
         }
@@ -1543,6 +1549,7 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
             if (!streamState.sentCreated) {
               streamState.model = chatChunk.model || streamState.model;
               ensureResponseCreated(clientRes, reqId, streamState, nextSeq);
+              if (config.logDebug) log('info', `  [Responses] response.created sent, model=${streamState.model}`);
             }
 
             // Start message item if not started
@@ -1550,9 +1557,11 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
               streamState.hasMessageItemStarted = true;
               streamState.textBuffer = '';
               streamState.contentIndex = 0;
+              streamState.messageOutputIndex = streamState.outputIndex;
+              streamState.outputIndex++;
               sendResponsesEvent(clientRes, 'response.output_item.added', {
                 type: 'response.output_item.added',
-                output_index: streamState.outputIndex,
+                output_index: streamState.messageOutputIndex,
                 item: {
                   type: 'message',
                   id: streamState.itemId,
@@ -1562,6 +1571,7 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
                 },
                 sequence_number: nextSeq()
               });
+              if (config.logDebug) log('info', `  [Responses] output_item.added sent`);
             }
 
             // Start content part if not started
@@ -1569,24 +1579,87 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
               streamState.hasContentPartStarted = true;
               sendResponsesEvent(clientRes, 'response.content_part.added', {
                 type: 'response.content_part.added',
-                output_index: streamState.outputIndex,
+                output_index: streamState.messageOutputIndex,
                 content_index: streamState.contentIndex,
                 item_id: streamState.itemId,
                 part: { type: 'output_text', text: '', annotations: [] },
                 sequence_number: nextSeq()
               });
+              if (config.logDebug) log('info', `  [Responses] content_part.added sent`);
             }
 
             // Emit delta
             sendResponsesEvent(clientRes, 'response.output_text.delta', {
               type: 'response.output_text.delta',
-              output_index: streamState.outputIndex,
+              output_index: streamState.messageOutputIndex,
               content_index: streamState.contentIndex,
               item_id: streamState.itemId,
               delta: delta.content,
               sequence_number: nextSeq()
             });
             streamState.textBuffer += delta.content;
+            upstreamContentReceived = true;
+          }
+
+          // Handle tool_calls (for Responses API → function_call conversion)
+          if (delta.tool_calls && delta.tool_calls.length > 0) {
+            if (!streamState.sentCreated) {
+              streamState.model = chatChunk.model || streamState.model;
+              ensureResponseCreated(clientRes, reqId, streamState, nextSeq);
+            }
+
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index || 0;
+
+              // First chunk for this tool call → emit output_item.added
+              if (!(idx in streamState.toolCallMap)) {
+                const tcItemId = generateId('fc_', 12);
+                const tcIndex = streamState.toolCalls.length;
+                streamState.toolCallMap[idx] = tcIndex;
+                streamState.toolCalls.push({
+                  id: tc.id || '',
+                  name: tc.function?.name || '',
+                  arguments: '',
+                  itemId: tcItemId,
+                  outputIndex: streamState.outputIndex,
+                });
+                streamState.outputIndex++;
+
+                sendResponsesEvent(clientRes, 'response.output_item.added', {
+                  type: 'response.output_item.added',
+                  output_index: streamState.toolCalls[tcIndex].outputIndex,
+                  item: {
+                    type: 'function_call',
+                    id: tcItemId,
+                    call_id: tc.id || '',
+                    name: tc.function?.name || '',
+                    arguments: '',
+                    status: 'in_progress'
+                  },
+                  sequence_number: nextSeq()
+                });
+                if (config.logDebug) log('info', `  [Responses] function_call added: ${tc.function?.name || '(unknown)'}`);
+              }
+
+              // Argument delta
+              const tcIndex = streamState.toolCallMap[idx];
+              const tcData = streamState.toolCalls[tcIndex];
+              if (tc.function?.arguments) {
+                tcData.arguments += tc.function.arguments;
+                sendResponsesEvent(clientRes, 'response.function_call_arguments.delta', {
+                  type: 'response.function_call_arguments.delta',
+                  item_id: tcData.itemId,
+                  output_index: tcData.outputIndex,
+                  delta: tc.function.arguments,
+                  sequence_number: nextSeq()
+                });
+              }
+              // Update id/call_id if provided in later chunks
+              if (tc.id && !tcData.id) {
+                tcData.id = tc.id;
+              }
+            }
+            upstreamContentReceived = true;
           }
 
           // Handle finish_reason
@@ -1595,7 +1668,7 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
             if (streamState.hasContentPartStarted) {
               sendResponsesEvent(clientRes, 'response.output_text.done', {
                 type: 'response.output_text.done',
-                output_index: streamState.outputIndex,
+                output_index: streamState.messageOutputIndex,
                 content_index: streamState.contentIndex,
                 item_id: streamState.itemId,
                 text: streamState.textBuffer,
@@ -1603,7 +1676,7 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
               });
               sendResponsesEvent(clientRes, 'response.content_part.done', {
                 type: 'response.content_part.done',
-                output_index: streamState.outputIndex,
+                output_index: streamState.messageOutputIndex,
                 content_index: streamState.contentIndex,
                 item_id: streamState.itemId,
                 part: { type: 'output_text', text: streamState.textBuffer, annotations: [] },
@@ -1614,7 +1687,7 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
             if (streamState.hasMessageItemStarted) {
               sendResponsesEvent(clientRes, 'response.output_item.done', {
                 type: 'response.output_item.done',
-                output_index: streamState.outputIndex,
+                output_index: streamState.messageOutputIndex,
                 item: {
                   type: 'message',
                   id: streamState.itemId,
@@ -1631,8 +1704,40 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
                 content: [{ type: 'output_text', text: streamState.textBuffer, annotations: [] }]
               });
               streamState.hasMessageItemStarted = false;
-              streamState.outputIndex++;
             }
+
+            // Close all open tool calls
+            for (const tcData of streamState.toolCalls) {
+              sendResponsesEvent(clientRes, 'response.function_call_arguments.done', {
+                type: 'response.function_call_arguments.done',
+                item_id: tcData.itemId,
+                output_index: tcData.outputIndex,
+                arguments: tcData.arguments,
+                sequence_number: nextSeq()
+              });
+              sendResponsesEvent(clientRes, 'response.output_item.done', {
+                type: 'response.output_item.done',
+                output_index: tcData.outputIndex,
+                item: {
+                  type: 'function_call',
+                  id: tcData.itemId,
+                  call_id: tcData.id,
+                  name: tcData.name,
+                  arguments: tcData.arguments,
+                  status: 'completed'
+                },
+                sequence_number: nextSeq()
+              });
+              streamState.collectedOutput.push({
+                type: 'function_call',
+                id: tcData.itemId,
+                call_id: tcData.id,
+                name: tcData.name,
+                arguments: tcData.arguments
+              });
+            }
+            streamState.toolCalls = [];
+            streamState.toolCallMap = {};
 
             streamState.pendingCompletion = true;
             // If there's usage in this chunk, emit completed now
@@ -1662,7 +1767,7 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
             }
             sendResponsesEvent(clientRes, 'response.output_text.delta', {
               type: 'response.output_text.delta',
-              output_index: streamState.outputIndex,
+              output_index: streamState.messageOutputIndex,
               content_index: streamState.contentIndex,
               item_id: streamState.itemId,
               delta: chatChunk.choices[0].delta.content,
@@ -1675,12 +1780,100 @@ function handleSSEResponse(upstreamRes, clientReq, clientRes, body, originalMode
         }
       }
     }
-    // Ensure completion is emitted
-    if (isResponsesApi && streamState.pendingCompletion) {
+
+    // For Responses API: ensure all closing events are sent before ending
+    if (isResponsesApi) {
+      // If we have content but didn't receive finish_reason, close the item now
+      if (streamState.hasContentPartStarted) {
+        log('warn', 'Stream ended without finish_reason — emitting closing events');
+        sendResponsesEvent(clientRes, 'response.output_text.done', {
+          type: 'response.output_text.done',
+          output_index: streamState.messageOutputIndex,
+          content_index: streamState.contentIndex,
+          item_id: streamState.itemId,
+          text: streamState.textBuffer,
+          sequence_number: nextSeq()
+        });
+        sendResponsesEvent(clientRes, 'response.content_part.done', {
+          type: 'response.content_part.done',
+          output_index: streamState.messageOutputIndex,
+          content_index: streamState.contentIndex,
+          item_id: streamState.itemId,
+          part: { type: 'output_text', text: streamState.textBuffer, annotations: [] },
+          sequence_number: nextSeq()
+        });
+        streamState.hasContentPartStarted = false;
+      }
+      if (streamState.hasMessageItemStarted) {
+        sendResponsesEvent(clientRes, 'response.output_item.done', {
+          type: 'response.output_item.done',
+          output_index: streamState.messageOutputIndex,
+          item: {
+            type: 'message',
+            id: streamState.itemId,
+            role: 'assistant',
+            content: [{ type: 'output_text', text: streamState.textBuffer, annotations: [] }],
+            status: 'completed'
+          },
+          sequence_number: nextSeq()
+        });
+        streamState.collectedOutput.push({
+          type: 'message',
+          id: streamState.itemId,
+          role: 'assistant',
+          content: [{ type: 'output_text', text: streamState.textBuffer, annotations: [] }]
+        });
+        streamState.hasMessageItemStarted = false;
+      }
+
+      // Close any open tool calls (stream ended without finish_reason)
+      if (streamState.toolCalls.length > 0) {
+        for (const tcData of streamState.toolCalls) {
+          sendResponsesEvent(clientRes, 'response.function_call_arguments.done', {
+            type: 'response.function_call_arguments.done',
+            item_id: tcData.itemId,
+            output_index: tcData.outputIndex,
+            arguments: tcData.arguments,
+            sequence_number: nextSeq()
+          });
+          sendResponsesEvent(clientRes, 'response.output_item.done', {
+            type: 'response.output_item.done',
+            output_index: tcData.outputIndex,
+            item: {
+              type: 'function_call',
+              id: tcData.itemId,
+              call_id: tcData.id,
+              name: tcData.name,
+              arguments: tcData.arguments,
+              status: 'completed'
+            },
+            sequence_number: nextSeq()
+          });
+          streamState.collectedOutput.push({
+            type: 'function_call',
+            id: tcData.itemId,
+            call_id: tcData.id,
+            name: tcData.name,
+            arguments: tcData.arguments
+          });
+        }
+        streamState.toolCalls = [];
+        streamState.toolCallMap = {};
+      }
+
+      // Always emit response.completed for Responses API streams
+      // (even if pendingCompletion was not set by finish_reason)
       emitCompleted(clientRes, reqId, streamState);
     }
+
     clientRes.end();
-    log('response', `stream done ${targetLabel(target, config)}`);
+    const stats = [];
+    if (upstreamChunkCount > 0) stats.push(`chunks=${upstreamChunkCount}`);
+    if (upstreamContentReceived) stats.push('content=true');
+    if (streamState.sentCreated) stats.push('sentCreated=true');
+    if (streamState.collectedOutput.length > 0) stats.push(`output=${streamState.collectedOutput.length}`);
+    const statsStr = stats.length > 0 ? ` (${stats.join(', ')})` : '';
+    log('response', `stream done ${targetLabel(target, config)}${statsStr}`);
   });
 
   upstreamRes.on('error', (err) => {
@@ -1745,8 +1938,15 @@ function ensureResponseCreated(clientRes, requestId, streamState, nextSeq) {
  * Emit response.completed event
  */
 function emitCompleted(clientRes, requestId, streamState) {
-  if (!streamState.pendingCompletion) return;
+  // Prevent duplicate completion events
+  if (streamState.completedEmitted) return;
+  streamState.completedEmitted = true;
   streamState.pendingCompletion = false;
+
+  // Ensure response.created was sent (in case stream had no content)
+  if (!streamState.sentCreated) {
+    ensureResponseCreated(clientRes, requestId, streamState, () => streamState.sequenceNumber++);
+  }
 
   const completedAt = Math.floor(Date.now() / 1000);
   const response = {
@@ -1769,6 +1969,9 @@ function emitCompleted(clientRes, requestId, streamState) {
     response,
     sequence_number: streamState.sequenceNumber++
   });
+  if (streamState.collectedOutput.length > 0) {
+    log('info', `  Responses API completed: ${streamState.collectedOutput.length} output item(s)`);
+  }
 }
 
 /**
